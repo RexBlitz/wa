@@ -1,482 +1,232 @@
 """
-Fixed WhatsApp UserBot class with improved error handling and compatibility
+Authentication manager for WhatsApp UserBot
+Handles login, session management, and authentication methods
 """
 
-import asyncio
 import time
-import os
 import json
-from typing import Dict, List, Optional, Any
+import base64
 from pathlib import Path
-
+from typing import Dict, Any, Optional
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import (
-    TimeoutException, 
-    NoSuchElementException, 
-    WebDriverException,
-    SessionNotCreatedException
-)
-
-# Import your other modules
-try:
-    from .telegram_bridge import TelegramBridge
-except ImportError:
-    TelegramBridge = None
-    
-try:
-    from .database import DatabaseManager
-except ImportError:
-    DatabaseManager = None
-    
-try:
-    from .module_manager import ModuleManager
-except ImportError:
-    ModuleManager = None
-    
-try:
-    from .message_handler import MessageHandler
-except ImportError:
-    MessageHandler = None
-    
-try:
-    from .auth import AuthenticationManager
-except ImportError:
-    AuthenticationManager = None
-
-from .webdriver_manager import WebDriverManager
-
-# Simple QR code generator if utils module doesn't exist
-def generate_qr_code(data, path):
-    """Simple QR code generation placeholder"""
-    try:
-        import qrcode
-        qr = qrcode.QRCode(version=1, box_size=10, border=5)
-        qr.add_data(data)
-        qr.make(fit=True)
-        
-        img = qr.make_image(fill_color="black", back_color="white")
-        img.save(path)
-        return path
-    except ImportError:
-        print(f"QR Code data available (install 'qrcode' library to save): {data[:50]}...")
-        return None
 
 
-class WhatsAppUserBot:
-    def __init__(self, config, logger):
+class AuthenticationManager:
+    def __init__(self, config, logger, telegram_bridge=None):
         self.config = config
         self.logger = logger
-        self.driver = None
-        self.running = False
-        
-        # Initialize components with error handling
-        self.db_manager = DatabaseManager(config, logger) if DatabaseManager else None
-        self.telegram_bridge = TelegramBridge(config, logger) if TelegramBridge and hasattr(config, 'telegram') and config.telegram.enabled else None
-        self.module_manager = ModuleManager(config, logger) if ModuleManager else None
-        self.message_handler = MessageHandler(config, logger) if MessageHandler else None
-        self.auth_manager = AuthenticationManager(config, logger, self.telegram_bridge) if AuthenticationManager else None
-        self.webdriver_manager = WebDriverManager(config, logger)
-        
-        # Message queue and processing
-        self.message_queue = asyncio.Queue()
-        self.processed_messages = set()
-        self.last_message_time = 0
-        
-        # Bot statistics
-        self.stats = {
-            'start_time': time.time(),
-            'messages_sent': 0,
-            'messages_received': 0,
-            'commands_executed': 0,
-            'errors': 0
-        }
-        
-        # WhatsApp Web selectors (updated for 2025)
-        self.selectors = {
-            'qr_code': '[data-testid="qrcode"], canvas[aria-label="Scan me!"], canvas',
-            'chat_list': '[data-testid="chat-list"], [role="grid"]',
-            'search_box': '[data-testid="chat-list-search"], [placeholder*="Search"]',
-            'message_input': '[data-testid="conversation-compose-box-input"], [contenteditable="true"][data-tab="10"]',
-            'send_button': '[data-testid="send"], [data-icon="send"]',
-            'messages': '[data-testid="msg-container"], [role="row"]',
-            'message_text': '.selectable-text, [data-testid="conversation-text"]'
-        }
+        self.session_data = {}
+        self.authenticated = False
+        self.telegram_bridge = telegram_bridge
+        self.logger.info("🔐 AuthenticationManager initialized")
 
-    # Rest of the bot.py remains unchanged
-    async def initialize(self):
-        """Initialize all bot components with better error handling"""
-        self.logger.info("🔧 Initializing bot components...")
-        
+    async def authenticate(self, driver) -> bool:
+        """Main authentication method"""
+        self.logger.info("🔐 Starting authentication process...")
         try:
-            os.makedirs("./temp", exist_ok=True)
-            os.makedirs("./sessions", exist_ok=True)
-            
-            if self.db_manager:
-                await self.db_manager.initialize()
-            
-            if self.telegram_bridge:
-                await self.telegram_bridge.initialize()
-            
-            if self.module_manager:
-                await self.module_manager.load_all_modules()
-            
-            if self.message_handler:
-                await self.message_handler.initialize(self)
-            
-            self.logger.info("✅ All available components initialized successfully")
-            
+            if self.config.whatsapp.auth_method == "qr":
+                success = await self._authenticate_qr(driver)
+            elif self.config.whatsapp.auth_method == "phone":
+                success = await self._authenticate_phone(driver)
+            else:
+                raise ValueError(f"Unsupported auth method: {self.config.whatsapp.auth_method}")
+            if success:
+                await self._save_session(driver)
+                self.authenticated = True
+            return success
         except Exception as e:
-            self.logger.error(f"❌ Failed to initialize components: {e}")
-            self.logger.warning("⚠️ Continuing with limited functionality")
+            self.logger.error(f"❌ Authentication failed: {e}", exc_info=True)
+            return False
 
-    async def start(self):
-        """Start the WhatsApp bot with improved error handling"""
+    async def _authenticate_qr(self, driver) -> bool:
+        """Authenticate using QR code"""
+        self.logger.info("📱 Authenticating with QR code...")
         try:
-            self.logger.info("🚀 Starting WhatsApp UserBot...")
+            max_attempts = 3
+            driver.get("https://web.whatsapp.com")
+            self.logger.debug("🌐 Loaded WhatsApp Web")
+            time.sleep(5)
             
-            self.driver = await self.webdriver_manager.setup_driver()
-            
-            if not self.driver:
-                raise Exception("Failed to setup WebDriver with all available methods")
-            
-            driver_info = self.webdriver_manager.get_driver_info()
-            self.logger.info(f"🌐 WebDriver Info: {driver_info}")
-            
-            implicit_wait = getattr(self.config.whatsapp, 'implicit_wait', 10)
-            page_load_timeout = getattr(self.config.whatsapp, 'page_load_timeout', 30)
-            
-            self.driver.implicitly_wait(implicit_wait)
-            self.driver.set_page_load_timeout(page_load_timeout)
-            
-            if not await self._authenticate():
-                raise Exception("Authentication failed")
-            
-            self.running = True
-            
-            tasks = []
-            tasks.append(asyncio.create_task(self._message_processor()))
-            tasks.append(asyncio.create_task(self._monitor_messages()))
-            
-            if self.telegram_bridge:
-                tasks.append(asyncio.create_task(self.telegram_bridge.start()))
-            
-            self.logger.info("🚀 Bot started successfully!")
-            
-            try:
-                while self.running:
-                    await asyncio.sleep(1)
-            except KeyboardInterrupt:
-                self.logger.info("🛑 Received shutdown signal")
-                await self.shutdown()
+            for attempt in range(max_attempts):
+                self.logger.info(f"🔄 QR authentication attempt {attempt + 1}/{max_attempts}")
+                qr_element = None
+                selectors = [
+                    '[data-testid="qrcode"]',
+                    'canvas[aria-label="Scan me!"]',
+                    'div[data-testid="qr"] canvas'
+                ]
+                for selector in selectors:
+                    try:
+                        qr_element = WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        self.logger.debug(f"Found QR element with selector: {selector}")
+                        break
+                    except:
+                        self.logger.debug(f"No QR element found with selector: {selector}")
                 
+                if not qr_element:
+                    self.logger.warning("⚠️ No QR code found, retrying...")
+                    driver.refresh()
+                    time.sleep(3)
+                    continue
+                
+                qr_data = qr_element.get_attribute("data-ref")
+                if not qr_data:
+                    self.logger.warning("⚠️ No data-ref, falling back to toDataURL")
+                    qr_data = driver.execute_script("return arguments[0].toDataURL('image/png');", qr_element)
+                
+                self.logger.debug(f"📱 QR data length: {len(qr_data)}")
+                
+                try:
+                    import qrcode
+                    qr = qrcode.QRCode(
+                        version=1,
+                        box_size=1,
+                        border=0,
+                        error_correction=qrcode.constants.ERROR_CORRECT_L
+                    )
+                    qr.add_data(qr_data[:500])
+                    qr.make(fit=True)
+                    self.logger.info("📱 Compact ASCII QR Code (scan this with WhatsApp):")
+                    qr.print_ascii(invert=True)
+                except Exception as e:
+                    self.logger.error(f"❌ Failed to generate ASCII QR code: {e}")
+                    try:
+                        qr = qrcode.QRCode(
+                            version=1,
+                            box_size=1,
+                            border=0,
+                            error_correction=qrcode.constants.ERROR_CORRECT_L
+                        )
+                        qr.add_data("test-auth-fallback")
+                        qr.make(fit=True)
+                        self.logger.info("📱 Fallback ASCII QR Code:")
+                        qr.print_ascii(invert=True)
+                    except Exception as e:
+                        self.logger.error(f"❌ Failed to generate fallback ASCII QR code: {e}")
+                
+                qr_path = await self._save_qr_code(qr_data)
+                if qr_path:
+                    self.logger.info(f"📱 QR Code saved to: {qr_path}")
+                    if self.telegram_bridge:
+                        try:
+                            self.logger.debug("📤 Sending QR code to Telegram")
+                            await self.telegram_bridge.forward_qr_code(qr_path)
+                            self.logger.info("📤 QR code sent to Telegram bot successfully")
+                        except Exception as e:
+                            self.logger.error(f"❌ Failed to send QR code to Telegram: {e}")
+                
+                self.logger.info("📱 Please scan the ASCII QR code above, the saved image, or check your Telegram bot")
+                driver.save_screenshot("/app/temp/screenshot.png")
+                self.logger.info("📸 Saved screenshot to /app/temp/screenshot.png")
+                
+                authenticated = await self._wait_for_authentication(driver, timeout=60)
+                if authenticated:
+                    self.logger.info("✅ QR code authentication successful!")
+                    return True
+                self.logger.warning("⏰ QR code authentication timed out")
+            
+            self.logger.error("❌ QR authentication failed after all attempts")
+            return False
         except Exception as e:
-            self.logger.error(f"❌ Failed to start bot: {e}")
-            await self.shutdown()
-            raise
+            self.logger.error(f"❌ QR authentication error: {e}", exc_info=True)
+            return False
 
-    async def _authenticate(self):
-        """Authenticate with WhatsApp Web using AuthenticationManager"""
-        self.logger.info("🔐 Authenticating with WhatsApp Web...")
-        
-        max_retries = 3
-        retry_count = 0
-        
-        while retry_count < max_retries:
+    async def _authenticate_phone(self, driver) -> bool:
+        """Authenticate using phone number"""
+        self.logger.info("📞 Phone number authentication not implemented")
+        return await self._authenticate_qr(driver)
+
+    async def _wait_for_authentication(self, driver, timeout: int = 60) -> bool:
+        """Wait for authentication to complete"""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
             try:
-                self.logger.info(f"📱 Loading WhatsApp Web (attempt {retry_count + 1}/{max_retries})...")
-                if self.auth_manager:
-                    if await self.auth_manager.authenticate(self.driver):
-                        self.logger.info("✅ Authentication successful!")
-                        return True
-                else:
-                    raise Exception("AuthenticationManager not initialized")
-                
-                retry_count += 1
-                if retry_count < max_retries:
-                    self.logger.warning(f"⚠️ Authentication attempt {retry_count} failed, retrying...")
-                    await asyncio.sleep(10)
-            
+                chats = driver.find_elements(By.CSS_SELECTOR, "[data-testid='chat-list']")
+                if chats:
+                    return True
+                qr_elements = driver.find_elements(By.CSS_SELECTOR, "[data-testid='qrcode']")
+                if not qr_elements:
+                    reload_buttons = driver.find_elements(By.CSS_SELECTOR, "[data-testid='qr-reload']")
+                    if reload_buttons:
+                        self.logger.info("🔄 QR code expired, clicking reload...")
+                        reload_buttons[0].click()
+                        time.sleep(2)
+                time.sleep(1)
             except Exception as e:
-                self.logger.error(f"❌ Authentication attempt {retry_count + 1} failed: {e}")
-                retry_count += 1
-                if retry_count < max_retries:
-                    await asyncio.sleep(10)
-        
-        self.logger.error("❌ All authentication attempts failed")
+                self.logger.debug(f"Waiting error: {e}")
+                time.sleep(1)
         return False
 
-    async def _monitor_messages(self):
-        """Enhanced message monitoring with better selectors"""
-        self.logger.info("👂 Starting message monitoring...")
-        
-        while self.running:
-            try:
-                await asyncio.sleep(2)
-                
-                messages = []
-                for selector in ['[data-testid="msg-container"]', '[role="row"]', '.message-in, .message-out']:
-                    try:
-                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                        if elements:
-                            messages = elements
-                            break
-                    except:
-                        continue
-                
-                if not messages:
-                    continue
-                
-                for message in messages[-5:]:
-                    try:
-                        message_id = message.get_attribute("data-id") or str(hash(message.get_attribute("outerHTML")))
-                        
-                        if message_id and message_id not in self.processed_messages:
-                            message_data = await self._extract_message_data(message)
-                            
-                            if message_data:
-                                await self.message_queue.put(message_data)
-                                self.processed_messages.add(message_id)
-                                
-                                if len(self.processed_messages) > 1000:
-                                    self.processed_messages = set(list(self.processed_messages)[-500:])
-                    except Exception as e:
-                        self.logger.debug(f"Error processing message: {e}")
-                        continue
-                
-            except Exception as e:
-                self.logger.error(f"❌ Error monitoring messages: {e}")
-                
-                try:
-                    self.driver.current_url
-                except:
-                    self.logger.info("🔄 WebDriver session lost, attempting recovery...")
-                    if await self.webdriver_manager.restart_driver():
-                        self.driver = self.webdriver_manager.driver
-                        await self._authenticate()
-                
-                await asyncio.sleep(10)
-
-    async def _extract_message_data(self, message_element):
-        """Enhanced message data extraction"""
+    async def _save_qr_code(self, qr_data: str) -> str:
+        """Save QR code data as image"""
         try:
-            message_text = ""
-            text_selectors = [
-                '.selectable-text',
-                '[data-testid="conversation-text"]',
-                '.copyable-text',
-                'span'
-            ]
-            
-            for selector in text_selectors:
-                try:
-                    text_element = message_element.find_element(By.CSS_SELECTOR, selector)
-                    if text_element and text_element.text.strip():
-                        message_text = text_element.text.strip()
-                        break
-                except:
-                    continue
-            
-            if not message_text:
-                return None
-            
-            is_outgoing = 'message-out' in message_element.get_attribute('class') or False
-            sender = "You" if is_outgoing else "Contact"
-            timestamp = time.time()
-            
-            return {
-                'id': message_element.get_attribute("data-id") or str(hash(message_text)),
-                'text': message_text,
-                'sender': sender,
-                'timestamp': timestamp,
-                'is_outgoing': is_outgoing,
-                'chat': await self._get_current_chat()
+            temp_dir = Path("/app/temp")
+            temp_dir.mkdir(exist_ok=True)
+            qr_path = temp_dir / "qr.png"
+            if qr_data.startswith("data:image/png;base64,"):
+                base64_data = qr_data.split(",", 1)[1]
+                with open(qr_path, "wb") as f:
+                    f.write(base64.b64decode(base64_data))
+            self.logger.debug(f"📱 Saved QR code to {qr_path}")
+            return str(qr_path)
+        except Exception as e:
+            self.logger.error(f"❌ Failed to save QR code: {e}")
+            return ""
+
+    async def _save_session(self, driver):
+        """Save session data"""
+        try:
+            cookies = driver.get_cookies()
+            session_data = {
+                'cookies': cookies,
+                'timestamp': time.time(),
+                'user_agent': self.config.whatsapp.user_agent
             }
-            
+            session_file = Path(self.config.whatsapp.session_dir) / "session.json"
+            session_file.parent.mkdir(exist_ok=True)
+            with open(session_file, 'w') as f:
+                json.dump(session_data, f, indent=2)
+            self.logger.info("💾 Session saved successfully")
         except Exception as e:
-            self.logger.debug(f"Could not extract message data: {e}")
-            return None
+            self.logger.error(f"❌ Failed to save session: {e}")
 
-    async def _get_current_chat(self):
-        """Get current active chat information"""
+    async def _load_session(self, driver):
+        """Load existing session"""
         try:
-            header_selectors = [
-                '[data-testid="conversation-info-header-chat-title"]',
-                'header span[title]',
-                '.chat-title'
-            ]
-            
-            for selector in header_selectors:
-                try:
-                    element = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    if element and element.text.strip():
-                        return element.text.strip()
-                except:
-                    continue
-            
-            return "Unknown Chat"
-        except:
-            return "Unknown Chat"
-
-    async def _message_processor(self):
-        """Process messages from the queue with error handling"""
-        while self.running:
-            try:
-                message = await asyncio.wait_for(self.message_queue.get(), timeout=1.0)
-                
-                if self.message_handler:
-                    await self.message_handler.handle_message(message)
-                else:
-                    self.logger.info(f"📨 Received: {message['text'][:100]}...")
-                
-                self.stats['messages_received'] += 1
-                
-                if self.telegram_bridge:
-                    await self.telegram_bridge.forward_message(message)
-                
-            except asyncio.TimeoutError:
-                continue
-            except Exception as e:
-                self.logger.error(f"❌ Error processing message: {e}")
-                self.stats['errors'] += 1
-
-    async def send_message(self, chat: str, message: str):
-        """Enhanced message sending with better selectors"""
-        try:
-            self.logger.info(f"📤 Sending message to {chat}: {message[:50]}...")
-            
-            if not await self._select_chat(chat):
-                self.logger.error(f"❌ Could not find chat: {chat}")
+            session_file = Path(self.config.whatsapp.session_dir) / "session.json"
+            if not session_file.exists():
                 return False
-            
-            input_box = None
-            input_selectors = [
-                '[data-testid="conversation-compose-box-input"]',
-                '[contenteditable="true"][data-tab="10"]',
-                '.selectable-text[contenteditable="true"]',
-                'div[contenteditable="true"]'
-            ]
-            
-            for selector in input_selectors:
-                try:
-                    input_box = WebDriverWait(self.driver, 10).until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                    )
-                    break
-                except:
-                    continue
-            
-            if not input_box:
-                self.logger.error("❌ Could not find message input box")
+            with open(session_file, 'r') as f:
+                session_data = json.load(f)
+            if time.time() - session_data.get('timestamp', 0) > 86400:
+                self.logger.info("📅 Session expired")
                 return False
-            
-            input_box.click()
-            await asyncio.sleep(0.5)
-            input_box.send_keys(message)
-            await asyncio.sleep(0.5)
-            
-            send_selectors = [
-                '[data-testid="send"]',
-                '[data-icon="send"]',
-                'button[data-testid="send"]'
-            ]
-            
-            for selector in send_selectors:
-                try:
-                    send_button = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    if send_button.is_enabled():
-                        send_button.click()
-                        break
-                except:
-                    continue
-            else:
-                input_box.send_keys(Keys.ENTER)
-            
-            await asyncio.sleep(1)
-            
-            self.stats['messages_sent'] += 1
-            
-            self.logger.info(f"✅ Message sent successfully")
+            driver.get("https://web.whatsapp.com")
+            for cookie in session_data.get('cookies', []):
+                driver.add_cookie(cookie)
+            driver.refresh()
+            time.sleep(3)
             return True
-            
         except Exception as e:
-            self.logger.error(f"❌ Failed to send message: {e}")
+            self.logger.debug(f"Could not load session: {e}")
             return False
 
-    async def _select_chat(self, chat_name: str):
-        """Select a chat by name"""
+    def is_authenticated(self) -> bool:
+        """Check if authenticated"""
+        return self.authenticated
+
+    async def logout(self, driver):
+        """Logout and clear session"""
         try:
-            search_selectors = [
-                '[data-testid="chat-list-search"]',
-                '[placeholder*="Search"]',
-                'input[title="Search input textbox"]'
-            ]
-            
-            search_box = None
-            for selector in search_selectors:
-                try:
-                    search_box = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    break
-                except:
-                    continue
-            
-            if search_box:
-                search_box.click()
-                search_box.clear()
-                search_box.send_keys(chat_name)
-                await asyncio.sleep(2)
-                
-                chat_elements = self.driver.find_elements(By.CSS_SELECTOR, '[data-testid="chat-list"] > div')
-                if chat_elements:
-                    chat_elements[0].click()
-                    await asyncio.sleep(1)
-                    return True
-            
-            return False
-            
+            session_file = Path(self.config.whatsapp.session_dir) / "session.json"
+            if session_file.exists():
+                session_file.unlink()
+            driver.delete_all_cookies()
+            self.authenticated = False
+            self.logger.info("🚪 Logged out successfully")
         except Exception as e:
-            self.logger.debug(f"Error selecting chat: {e}")
-            return False
-
-    async def get_stats(self):
-        """Get bot statistics"""
-        current_time = time.time()
-        uptime = current_time - self.stats['start_time']
-        
-        driver_info = self.webdriver_manager.get_driver_info()
-        
-        return {
-            **self.stats,
-            'uptime': uptime,
-            'uptime_formatted': f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m {int(uptime % 60)}s",
-            'driver_info': driver_info,
-            'queue_size': self.message_queue.qsize(),
-            'processed_messages_count': len(self.processed_messages)
-        }
-
-    async def shutdown(self):
-        """Gracefully shutdown the bot"""
-        self.logger.info("🛑 Shutting down bot...")
-        
-        self.running = False
-        
-        await asyncio.sleep(2)
-        
-        if self.webdriver_manager:
-            self.webdriver_manager.cleanup()
-        
-        if self.telegram_bridge:
-            try:
-                await self.telegram_bridge.shutdown()
-            except:
-                pass
-        
-        if self.db_manager:
-            try:
-                await self.db_manager.close()
-            except:
-                pass
-        
-        self.logger.info("✅ Bot shutdown complete")
+            self.logger.error(f"❌ Logout error: {e}")
