@@ -36,4 +36,4 @@ chromium
 # Additional compatibility packages
 psutil
 packaging
-playwright install
+
