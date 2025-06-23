@@ -76,7 +76,7 @@ class AuthenticationManager:
                 qr_data = qr_element.get_attribute("data-ref")
                 if not qr_data:
                     self.logger.warning("⚠️ No data-ref, falling back to toDataURL")
-                    qr_data = driver.execute_script("return arguments[0].toDataURL();", qr_element)
+                    qr_data = driver.execute_script("return arguments[0].toDataURL('image/png');", qr_element)
                 
                 self.logger.debug(f"📱 QR data length: {len(qr_data)}")
                 
@@ -109,15 +109,15 @@ class AuthenticationManager:
                         self.logger.error(f"❌ Failed to generate fallback ASCII QR code: {e}")
                 
                 qr_path = await self._save_qr_code(qr_data)
-                self.logger.info(f"📱 QR Code saved to: {qr_path}")
-                
-                if self.telegram_bridge and qr_path:
-                    try:
-                        self.logger.debug("📤 Sending QR code to Telegram")
-                        await self.telegram_bridge.forward_qr_code(qr_path)
-                        self.logger.info("📤 QR code sent to Telegram bot successfully")
-                    except Exception as e:
-                        self.logger.error(f"❌ Failed to send QR code to Telegram: {e}")
+                if qr_path:
+                    self.logger.info(f"📱 QR Code saved to: {qr_path}")
+                    if self.telegram_bridge:
+                        try:
+                            self.logger.debug("📤 Sending QR code to Telegram")
+                            await self.telegram_bridge.forward_qr_code(qr_path)
+                            self.logger.info("📤 QR code sent to Telegram bot successfully")
+                        except Exception as e:
+                            self.logger.error(f"❌ Failed to send QR code to Telegram: {e}")
                 
                 self.logger.info("📱 Please scan the ASCII QR code above, the saved image, or check your Telegram bot")
                 driver.save_screenshot("/app/temp/screenshot.png")
