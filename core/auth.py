@@ -8,6 +8,8 @@ import json
 import base64
 from pathlib import Path
 from typing import Dict, Any, Optional
+import telegram
+import asyncio
 
 
 class AuthenticationManager:
@@ -16,6 +18,14 @@ class AuthenticationManager:
         self.logger = logger
         self.session_data = {}
         self.authenticated = False
+        # Initialize Telegram bot
+        self.telegram_bot = None
+        if hasattr(self.config, 'telegram') and self.config.telegram.bot_token and self.config.telegram.chat_id:
+            try:
+                self.telegram_bot = telegram.Bot(token=self.config.telegram.bot_token)
+                self.logger.info("🤖 Telegram bot initialized successfully")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to initialize Telegram bot: {e}")
 
     async def authenticate(self, driver) -> bool:
         """Main authentication method"""
@@ -80,34 +90,37 @@ class AuthenticationManager:
                     return canvas.toDataURL();
                 """, qr_element)
                 
-                # Log QR code base64 data
+                # Log QR code base64 data (truncated for brevity)
                 self.logger.info(f"📱 QR code base64 data: {qr_data[:100]}... (full length: {len(qr_data)})")
                 
-                # Generate and log ASCII QR code with version control
+                # Generate and log compact ASCII QR code
                 try:
                     import qrcode
-                    qr = qrcode.QRCode(version=10, box_size=1, border=1)  # Force lower version for ASCII
-                    qr.add_data(qr_data)
+                    qr = qrcode.QRCode(version=1, box_size=1, border=0, error_correction=qrcode.constants.ERROR_CORRECT_L)
+                    qr.add_data(qr_data[:500])  # Limit data to ensure small size
                     qr.make(fit=True)
-                    self.logger.info("📱 ASCII QR Code (scan this with WhatsApp):")
-                    qr.print_ascii()
-                except ValueError as e:
-                    self.logger.error(f"❌ Failed to generate ASCII QR code: {e}. Trying with truncated data...")
-                    try:
-                        qr = qrcode.QRCode(version=1, box_size=1, border=1)
-                        qr.add_data(qr_data[:1000])  # Truncate data for smaller QR code
-                        qr.make(fit=True)
-                        self.logger.info("📱 ASCII QR Code (truncated, scan this with WhatsApp):")
-                        qr.print_ascii()
-                    except Exception as e:
-                        self.logger.error(f"❌ Failed to generate ASCII QR code with truncation: {e}")
+                    self.logger.info("📱 Compact ASCII QR Code (scan this with WhatsApp):")
+                    qr.print_ascii(invert=True)  # Invert for better terminal contrast
                 except Exception as e:
-                    self.logger.error(f"❌ Failed to generate ASCII QR code: {e}")
+                    self.logger.error(f"❌ Failed to generate ASCII QR code: {e}. Trying with minimal data...")
+                    try:
+                        qr = qrcode.QRCode(version=1, box_size=1, border=0, error_correction=qrcode.constants.ERROR_CORRECT_L)
+                        qr.add_data(qr_data[:200])  # Further truncate
+                        qr.make(fit=True)
+                        self.logger.info("📱 Minimal ASCII QR Code (scan this with WhatsApp):")
+                        qr.print_ascii(invert=True)
+                    except Exception as e:
+                        self.logger.error(f"❌ Failed to generate minimal ASCII QR code: {e}")
                 
                 # Save QR code as image
                 qr_path = await self._save_qr_code(qr_data)
                 self.logger.info(f"📱 QR Code saved to: {qr_path}")
-                self.logger.info("📱 Please scan the ASCII QR code above or the saved image with your WhatsApp mobile app")
+                
+                # Send QR code to Telegram bot
+                if self.telegram_bot and qr_path != "QR code could not be saved":
+                    await self._send_to_telegram(qr_path)
+                
+                self.logger.info("📱 Please scan the ASCII QR code above, the saved image, or check your Telegram bot")
                 
                 # Save screenshot for debugging
                 driver.save_screenshot("/app/temp/screenshot.png")
@@ -128,6 +141,23 @@ class AuthenticationManager:
         except Exception as e:
             self.logger.error(f"❌ QR authentication error: {e}")
             return False
+
+    async def _send_to_telegram(self, qr_path: str):
+        """Send QR code image to Telegram bot"""
+        try:
+            if not self.telegram_bot:
+                self.logger.warning("⚠️ Telegram bot not initialized, skipping send")
+                return
+            
+            with open(qr_path, 'rb') as photo:
+                await self.telegram_bot.send_photo(
+                    chat_id=self.config.telegram.chat_id,
+                    photo=photo,
+                    caption="WhatsApp QR Code - Scan to authenticate"
+                )
+            self.logger.info("📤 QR code sent to Telegram bot successfully")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to send QR code to Telegram: {e}")
 
     async def _authenticate_phone(self, driver) -> bool:
         """Authenticate using phone number"""
