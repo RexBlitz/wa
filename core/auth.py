@@ -1,6 +1,6 @@
 """
 Authentication manager for WhatsApp UserBot
-Handles login, session management, and authentication with popup handling
+Handles login, session management, and authentication with improved popup handling
 """
 
 import time
@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import qrcode
 import re
-from selenium.common.exceptions import NoSuchElementException, TimeoutException, WebDriverException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException, WebDriverException, InvalidSelectorException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
 
 
 class AuthenticationManager:
@@ -169,7 +170,7 @@ class AuthenticationManager:
         return await self._authenticate_qr(driver)
 
     async def _wait_for_authentication(self, driver, timeout: int = 120) -> bool:
-        """Wait for authentication to complete with popup handling"""
+        """Wait for authentication to complete with improved popup handling"""
         start_time = time.time()
         self.logger.info(f"⏳ Waiting for authentication (timeout: {timeout} seconds)")
 
@@ -190,7 +191,8 @@ class AuthenticationManager:
             '[data-testid="wa-connection-error"]',
             'div.loading'
         ]
-        popup_selector = 'button:contains("Continue")'  # Approximate selector for the Continue button
+        # Updated popup selector: Use XPath to find button with "Continue" text
+        popup_selector = "//button[contains(text(), 'Continue') or contains(@data-testid, 'continue')]"
 
         while time.time() - start_time < timeout:
             try:
@@ -202,13 +204,13 @@ class AuthenticationManager:
                     time.sleep(2)
                     continue
 
-                # Check for and dismiss the Continue popup
+                # Check for and dismiss the Continue popup using XPath
                 try:
                     continue_button = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, popup_selector))
+                        EC.element_to_be_clickable((By.XPATH, popup_selector))
                     )
                     self.logger.info("📣 Found Continue popup, clicking...")
-                    continue_button.click()
+                    ActionChains(driver).move_to_element(continue_button).click().perform()
                     time.sleep(2)  # Wait for page to update after clicking
                     screenshot_path = Path(f"/app/temp/popup_dismissed_{int(time.time())}.png")
                     driver.save_screenshot(str(screenshot_path))
@@ -216,8 +218,8 @@ class AuthenticationManager:
                     if self.telegram_bridge:
                         await self.telegram_bridge.forward_qr_code(str(screenshot_path))
                         self.logger.info("📤 Sent popup dismissal screenshot to Telegram")
-                except (TimeoutException, NoSuchElementException):
-                    self.logger.debug("No Continue popup found")
+                except (TimeoutException, NoSuchElementException, InvalidSelectorException) as e:
+                    self.logger.debug(f"No Continue popup found or selector invalid: {e}")
 
                 # Check for loading/error states
                 for selector in loading_indicators:
