@@ -1,5 +1,5 @@
 """
-WhatsApp UserBot with improved error handling, authentication, and debugging
+WhatsApp UserBot with enhanced authentication detection and debugging
 """
 
 import asyncio
@@ -51,7 +51,8 @@ class WhatsAppUserBot:
             'message_input': '[data-testid="conversation-compose-box-input"]',
             'messages': '[data-testid="msg-container"]',
             'search_bar': '[data-testid="chat-list-search"]',
-            'main_container': '[data-testid="wa-web-main-container"]'
+            'main_container': '[data-testid="wa-web-main-container"]',
+            'conversation_panel': '[data-testid="conversation-panel"]'
         }
         self.logger.info("🤖 WhatsAppUserBot initialized")
 
