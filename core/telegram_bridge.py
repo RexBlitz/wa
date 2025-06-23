@@ -1,253 +1,217 @@
-"""
-Authentication manager for WhatsApp UserBot
-Handles login, session management, and authentication methods
-"""
-
-import time
-import json
-import base64
+import telegram
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, Optional
+import json
 
-
-class AuthenticationManager:
+class TelegramBridge:
     def __init__(self, config, logger):
         self.config = config
         self.logger = logger
-        self.session_data = {}
-        self.authenticated = False
+        self.bot = None
+        self.group_chat_id = None
+        self.enabled = False
+        # Mapping Telegram message_id to WhatsApp details for replies
+        self.message_map: Dict[int, Dict[str, Any]] = {} # Telegram message_id -> {'whatsapp_chat_id': ..., 'whatsapp_message_id': ...}
+        # Mapping WhatsApp chat/message to Telegram details for threading/tracking
+        self.whatsapp_to_telegram_map: Dict[str, Dict[str, Any]] = {} # whatsapp_chat_id -> {'telegram_chat_id': ..., 'telegram_thread_id': ...}
+        self.map_file = Path("./temp/telegram_message_map.json") # Persistent mapping file
 
-    async def authenticate(self, driver) -> bool:
-        """Main authentication method"""
-        self.logger.info("🔐 Starting authentication process...")
-        
-        try:
-            # Force QR code authentication
-            if self.config.whatsapp.auth_method == "qr":
-                success = await self._authenticate_qr(driver)
-            elif self.config.whatsapp.auth_method == "phone":
-                success = await self._authenticate_phone(driver)
-            else:
-                raise ValueError(f"Unsupported auth method: {self.config.whatsapp.auth_method}")
-            
-            if success:
-                await self._save_session(driver)
-                self.authenticated = True
-            
-            return success
-            
-        except Exception as e:
-            self.logger.error(f"❌ Authentication failed: {e}")
-            return False
+        # Ensure the temp directory exists for the map file
+        Path("./temp").mkdir(exist_ok=True)
 
-    async def _authenticate_qr(self, driver) -> bool:
-        """Authenticate using QR code"""
-        self.logger.info("📱 Authenticating with QR code...")
-        
-        try:
-            max_attempts = 3
-            driver.get("https://web.whatsapp.com")
-            time.sleep(5)  # Wait for page to load
-            
-            for attempt in range(max_attempts):
-                self.logger.info(f"🔄 QR authentication attempt {attempt + 1}/{max_attempts}")
-                
-                # Look for QR code with multiple selectors
-                selectors = [
-                    'canvas[aria-label="Scan me!"]',
-                    'canvas',
-                    '[data-testid="qrcode"]',
-                    'div[data-testid="qr"] canvas'
-                ]
-                qr_element = None
-                qr_data = None
-                for selector in selectors:
-                    self.logger.debug(f"Trying QR selector: {selector}")
-                    qr_elements = driver.find_elements("css selector", selector)
-                    self.logger.debug(f"Found {len(qr_elements)} elements with selector {selector}")
-                    if qr_elements:
-                        qr_element = qr_elements[0]
-                        break
-                
-                if not qr_element:
-                    self.logger.warning("⚠️ No QR code found, retrying...")
-                    driver.refresh()
-                    time.sleep(3)
-                    continue
-                
-                # Get QR code data
-                qr_data = driver.execute_script("""
-                    var canvas = arguments[0];
-                    var ctx = canvas.getContext('2d');
-                    var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                    var pixels = imgData.data;
-                    var qrCodeData = '';
-                    for (var y = 0; y < canvas.height; y++) {
-                        for (var x = 0; x < canvas.width; x++) {
-                            var idx = (y * canvas.width + x) * 4;
-                            var isBlack = pixels[idx] < 128; // Simplified threshold
-                            qrCodeData += isBlack ? '1' : '0';
-                        }
-                    }
-                    return qrCodeData;
-                """, qr_element)
-                
-                # Generate and log ASCII QR code
-                try:
-                    import qrcode
-                    qr = qrcode.QRCode(version=1, box_size=10, border=5)
-                    qr.add_data(qr_data)
-                    qr.make(fit=True)
-                    self.logger.info("📱 ASCII QR Code (scan this with WhatsApp):")
-                    qr.print_ascii()
-                except ImportError:
-                    self.logger.error("❌ qrcode library not installed, cannot print ASCII QR code")
-                except Exception as e:
-                    self.logger.error(f"❌ Failed to generate ASCII QR code: {e}")
-                
-                # Save QR code as image
-                qr_path = await self._save_qr_code(qr_data)
-                self.logger.info(f"📱 QR Code saved to: {qr_path}")
-                self.logger.info("📱 Please scan the ASCII QR code above or the saved image with your WhatsApp mobile app")
-                
-                # Save screenshot for debugging
-                driver.save_screenshot("/app/temp/screenshot.png")
-                self.logger.info("📸 Saved screenshot to /app/temp/screenshot.png")
-                
-                # Wait for authentication
-                authenticated = await self._wait_for_authentication(driver, timeout=60)
-                
-                if authenticated:
-                    self.logger.info("✅ QR code authentication successful!")
-                    return True
-                else:
-                    self.logger.warning("⏰ QR code authentication timed out")
-            
-            self.logger.error("❌ QR authentication failed after all attempts")
-            return False
-            
-        except Exception as e:
-            self.logger.error(f"❌ QR authentication error: {e}")
-            return False
 
-    async def _authenticate_phone(self, driver) -> bool:
-        """Authenticate using phone number"""
-        self.logger.info("📞 Phone number authentication not fully implemented")
-        self.logger.info("📞 Falling back to QR code authentication")
-        return await self._authenticate_qr(driver)
+    async def initialize(self):
+        """Initializes the Telegram bot client."""
+        if hasattr(self.config, 'telegram') and self.config.telegram.enabled:
+            token = self.config.telegram.bot_token
+            group_chat_id = self.config.telegram.bridge_group_id # Use bridge_group_id from config
+            
+            if not token or not group_chat_id:
+                self.logger.warning("⚠️ Telegram bot_token or bridge_group_id not configured. Telegram bridge will be disabled.")
+                self.enabled = False
+                return
 
-    async def _wait_for_authentication(self, driver, timeout: int = 60) -> bool:
-        """Wait for authentication to complete"""
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
             try:
-                chats = driver.find_elements("css selector", "[data-testid='chat-list']")
-                if chats:
-                    return True
+                self.bot = telegram.Bot(token=token)
+                self.group_chat_id = int(group_chat_id) # Ensure chat_id is integer
+                self.enabled = True
+                self.logger.info("📡 Telegram Bridge initialized successfully.")
                 
-                qr_elements = driver.find_elements("css selector", "canvas")
-                if not qr_elements:
-                    reload_buttons = driver.find_elements("css selector", "[data-testid='qr-reload']")
-                    if reload_buttons:
-                        self.logger.info("🔄 QR code expired, clicking reload...")
-                        reload_buttons[0].click()
-                        time.sleep(2)
-                
-                time.sleep(2)
+                # Load existing message map
+                await self._load_message_map()
+
+                # Optional: Send a startup message
+                await self.send_message_to_group("WhatsApp UserBot started and Telegram bridge is active! Waiting for messages...")
                 
             except Exception as e:
-                self.logger.debug(f"Waiting for auth: {e}")
-                time.sleep(2)
+                self.logger.error(f"❌ Failed to initialize Telegram bot: {e}")
+                self.enabled = False
+        else:
+            self.logger.info("Telegram bridge is disabled in configuration.")
+            self.enabled = False
+
+    async def _load_message_map(self):
+        """Loads the message map from a file."""
+        if self.map_file.exists():
+            try:
+                with open(self.map_file, 'r') as f:
+                    data = json.load(f)
+                    # Convert keys back to int for message_map if they were saved as strings
+                    self.message_map = {int(k): v for k, v in data.get('message_map', {}).items()}
+                    self.whatsapp_to_telegram_map = data.get('whatsapp_to_telegram_map', {})
+                self.logger.info(f"Loaded {len(self.message_map)} message mappings from {self.map_file}")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to load message map: {e}")
+
+    async def _save_message_map(self):
+        """Saves the message map to a file."""
+        try:
+            with open(self.map_file, 'w') as f:
+                json.dump({
+                    'message_map': self.message_map,
+                    'whatsapp_to_telegram_map': self.whatsapp_to_telegram_map
+                }, f, indent=2)
+            self.logger.debug(f"Saved message map to {self.map_file}")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to save message map: {e}")
+
+    async def start(self, update_queue: asyncio.Queue):
+        """Starts the Telegram bot for polling updates and pushes them to update_queue."""
+        if not self.enabled:
+            self.logger.info("Telegram bridge not enabled, skipping bot polling.")
+            return
+
+        self.logger.info("🚀 Starting Telegram bot polling...")
         
-        return False
+        offset = 0
+        while self.enabled:
+            try:
+                updates = await self.bot.get_updates(offset=offset, timeout=10)
+                for update in updates:
+                    offset = update.update_id + 1
+                    if update.message:
+                        await update_queue.put(update.message) # Push incoming message to a queue
+                        self.logger.info(f"Received Telegram message (ID: {update.message.message_id}) from {update.message.from_user.username}")
+                await asyncio.sleep(1) # Short delay to avoid hammering API
+            except telegram.error.TimedOut:
+                pass
+            except telegram.error.NetworkError as e:
+                self.logger.error(f"❌ Telegram Network Error: {e}. Retrying in 5 seconds...")
+                await asyncio.sleep(5)
+            except Exception as e:
+                self.logger.error(f"❌ Unhandled error during Telegram polling: {e}")
+                await asyncio.sleep(5)
 
-    async def _save_qr_code(self, qr_data: str) -> str:
-        """Save QR code data as image"""
+    async def send_message_to_group(self, text: str, reply_to_message_id: int = None, thread_id: int = None):
+        """Sends a text message to the configured Telegram group."""
+        if self.enabled and self.bot and self.group_chat_id:
+            try:
+                message = await self.bot.send_message(
+                    chat_id=self.group_chat_id,
+                    text=text,
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=thread_id, # For topics/threads in supergroups
+                    parse_mode=telegram.ParseMode.MARKDOWN_V2 # For rich formatting
+                )
+                self.logger.debug(f"Sent Telegram message to group: {text[:50]}...")
+                return message.message_id
+            except Exception as e:
+                self.logger.error(f"❌ Failed to send Telegram message to group: {e}")
+        elif not self.enabled:
+            self.logger.debug("Telegram bridge not enabled, skipping message send.")
+        return None
+
+    async def forward_qr_code(self, qr_image_path: str):
+        """Sends the QR code image to the configured Telegram group."""
+        if self.enabled and self.bot and self.group_chat_id:
+            try:
+                qr_file = Path(qr_image_path)
+                if qr_file.exists():
+                    with open(qr_file, 'rb') as f:
+                        await self.bot.send_photo(chat_id=self.group_chat_id, photo=f, caption="WhatsApp QR Code for login")
+                    self.logger.info(f"✅ QR code image sent to Telegram: {qr_image_path}")
+                else:
+                    self.logger.error(f"❌ QR code image file not found: {qr_image_path}")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to send QR code image to Telegram: {e}")
+        elif not self.enabled:
+            self.logger.debug("Telegram bridge not enabled, skipping QR code send.")
+
+    async def forward_whatsapp_message(self, message_data: Dict[str, Any]):
+        """Forwards a WhatsApp message to Telegram, attempting to use threads/replies."""
+        if not self.enabled:
+            self.logger.debug("Telegram bridge not enabled, skipping WhatsApp message forward.")
+            return
+
         try:
-            temp_dir = Path("./temp")
-            temp_dir.mkdir(exist_ok=True)
+            chat_name = message_data.get('chat', 'Unknown Chat')
+            sender = message_data.get('sender', 'Unknown Sender')
+            text = message_data.get('text', 'No text')
+            whatsapp_chat_id = message_data.get('chat_id') # WhatsApp chat ID (unique per chat)
+            whatsapp_message_id = message_data.get('id') # WhatsApp message ID (unique per message within a chat)
             
-            qr_path = temp_dir / "whatsapp_qr.png"
+            # Use WhatsApp chat ID as key for Telegram threading/topic
+            telegram_thread_id = None
+            if self.config.telegram.thread_per_user:
+                # Check if we already have a Telegram thread/topic for this WhatsApp chat
+                if whatsapp_chat_id in self.whatsapp_to_telegram_map:
+                    telegram_thread_id = self.whatsapp_to_telegram_map[whatsapp_chat_id].get('telegram_thread_id')
+                # If not, Telegram's API will create a new topic if group_chat_id is a supergroup and message_thread_id is absent
+                # or it will just post to the main group.
+                # For a new topic, you'd typically need to explicitly create it first and get its ID.
+                # For this basic implementation, we'll try to rely on direct replies or main group.
+                # If `telegram_thread_id` is None, it will post to the main group.
             
-            if qr_data.startswith("data:image/png;base64,"):
-                base64_data = qr_data.split(",")[1]
-                with open(qr_path, "wb") as f:
-                    f.write(base64.b64decode(base64_data))
+            # Formulate the message to send to Telegram (MarkdownV2)
+            formatted_message = (
+                f"💬 *New WhatsApp Message*\n"
+                f"\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\n"
+                f"*Chat*: `{self._escape_markdown_v2(chat_name)}`\n"
+                f"*From*: `{self._escape_markdown_v2(sender)}`\n"
+                f"*Message*: {self._escape_markdown_v2(text)}\n"
+                f"\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_\\_"
+            )
             
-            return str(qr_path)
-            
-        except Exception as e:
-            self.logger.error(f"❌ Failed to save QR code: {e}")
-            return "QR code could not be saved"
+            # Send to Telegram and get the message ID
+            telegram_message_id = await self.send_message_to_group(
+                formatted_message,
+                thread_id=telegram_thread_id
+            )
 
-    async def _save_session(self, driver):
-        """Save session data for future use"""
-        try:
-            cookies = driver.get_cookies()
-            
-            session_data = {
-                'cookies': cookies,
-                'timestamp': time.time(),
-                'user_agent': self.config.whatsapp.user_agent
-            }
-            
-            session_file = Path(self.config.whatsapp.session_dir) / "session.json"
-            with open(session_file, 'w') as f:
-                json.dump(session_data, f, indent=2)
-            
-            self.logger.info("💾 Session saved successfully")
-            
-        except Exception as e:
-            self.logger.error(f"❌ Failed to save session: {e}")
+            if telegram_message_id:
+                # Store the mapping for replies
+                self.message_map[telegram_message_id] = {
+                    'whatsapp_chat_id': whatsapp_chat_id,
+                    'whatsapp_message_id': whatsapp_message_id # Can be None if not needed for replies
+                }
+                # Store mapping for threading (if a thread was created/used)
+                if whatsapp_chat_id not in self.whatsapp_to_telegram_map:
+                    self.whatsapp_to_telegram_map[whatsapp_chat_id] = {
+                        'telegram_chat_id': self.group_chat_id,
+                        'telegram_thread_id': telegram_thread_id # Will be None if not using explicit topics
+                    }
+                await self._save_message_map()
+                self.logger.info(f"WhatsApp message forwarded to Telegram (Msg ID: {telegram_message_id}).")
+            else:
+                self.logger.error("Failed to get Telegram message ID after forwarding WhatsApp message.")
 
-    async def _load_session(self):
-        """Load existing session"""
-        try:
-            session_file = Path(self.config.whatsapp.session_dir) / "session.json"
-            
-            if not session_file.exists():
-                return False
-            
-            with open(session_file, 'r') as f:
-                session_data = json.load(f)
-            
-            if time.time() - session_data.get('timestamp', 0) > 86400:
-                self.logger.info("📅 Session expired, need fresh authentication")
-                return False
-            
-            driver.get("https://web.whatsapp.com")
-            
-            for cookie in session_data.get('cookies', []):
-                try:
-                    driver.add_cookie(cookie)
-                except Exception as e:
-                    self.logger.debug(f"Could not add cookie: {e}")
-            
-            driver.refresh()
-            time.sleep(3)
-            
-            return True
-            
         except Exception as e:
-            self.logger.debug(f"Could not load session: {e}")
-            return False
+            self.logger.error(f"❌ Error forwarding WhatsApp message to Telegram: {e}")
 
-    def is_authenticated(self) -> bool:
-        """Check if currently authenticated"""
-        return self.authenticated
+    def _escape_markdown_v2(self, text: str) -> str:
+        """Helper to escape characters for MarkdownV2 parse mode."""
+        # See https://core.telegram.org/bots/api#markdownv2-style
+        escape_chars = '_*[]()~`>#+-=|{}.!' # These need to be escaped
+        return ''.join(['\\' + char if char in escape_chars else char for char in text])
 
-    async def logout(self, driver):
-        """Logout and clear session"""
-        try:
-            session_file = Path(self.config.whatsapp.session_dir) / "session.json"
-            if session_file.exists():
-                session_file.unlink()
-            
-            driver.delete_all_cookies()
-            
-            self.authenticated = False
-            self.logger.info("🚪 Logged out")
-            
-        except Exception as e:
-            self.logger.error(f"❌ Logout error: {e}")
+    async def get_whatsapp_details_for_telegram_reply(self, telegram_message_id: int):
+        """Retrieves WhatsApp details corresponding to a Telegram message ID."""
+        return self.message_map.get(telegram_message_id)
+
+    async def shutdown(self):
+        """Performs cleanup for the Telegram bridge."""
+        if self.enabled:
+            self.logger.info("🛑 Shutting down Telegram Bridge.")
+            await self._save_message_map()
+            self.enabled = False # Stop the polling loop
