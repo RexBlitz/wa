@@ -79,13 +79,15 @@ class AuthenticationManager:
                 qr_data_ref = qr_element.get_attribute("data-ref")
                 qr_data_url = None
                 try:
-                    qr_data_url = driver.execute_script("""
-                        var canvas = arguments[0];
-                        if (canvas && typeof canvas.toDataURL === 'function') {
-                            return canvas.toDataURL();
-                        }
-                        return null;
-                    """, qr_element)
+                    # Attempt to get data URL from canvas, if it's a canvas element
+                    if qr_element.tag_name == 'canvas':
+                        qr_data_url = driver.execute_script("""
+                            var canvas = arguments[0];
+                            if (canvas && typeof canvas.toDataURL === 'function') {
+                                return canvas.toDataURL();
+                            }
+                            return null;
+                        """, qr_element)
                 except Exception as e:
                     self.logger.debug(f"Failed to get QR data from canvas.toDataURL(): {e}")
 
@@ -101,6 +103,7 @@ class AuthenticationManager:
                 self.logger.info(f"📱 QR code data retrieved. Type: {'data-ref' if qr_data_ref else 'toDataURL'}, Length: {len(qr_data_to_encode)}")
 
                 # Save QR code as image
+                # Pass is_data_ref to _save_qr_code to handle different data types
                 qr_path = await self._save_qr_code(qr_data_to_encode, qr_data_ref is not None)
                 self.logger.info(f"📱 QR Code saved to: {qr_path}")
                 
