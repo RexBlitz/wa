@@ -40,101 +40,94 @@ class AuthenticationManager:
             self.logger.error(f"❌ Authentication failed: {e}")
             return False
 
-async def _authenticate_qr(self, driver) -> bool:
-    self.logger.info("📱 Authenticating with QR code...")
-    try:
-        max_attempts = 3
-        driver.get("[invalid url, do not cite])
-        time.sleep(5)  # Wait for page to load
+    async def _authenticate_qr(self, driver) -> bool:
+        """Authenticate using QR code"""
+        self.logger.info("📱 Authenticating with QR code...")
         
-        for attempt in range(max_attempts):
-            self.logger.info(f"🔄 QR authentication attempt {attempt + 1}/{max_attempts}")
+        try:
+            max_attempts = 3
+            driver.get("https://web.whatsapp.com")
+            time.sleep(5)  # Wait for page to load
             
-            # Look for QR code with multiple selectors
-            selectors = [
-                'canvas[aria-label="Scan me!"]',
-                'canvas',
-                '[data-testid="qrcode"]',
-                'div[data-testid="qr"] canvas'
-            ]
-            qr_element = None
-            qr_data = None
-            for selector in selectors:
-                self.logger.debug(f"Trying QR selector: {selector}")
-                qr_elements = driver.find_elements("css selector", selector)
-                self.logger.debug(f"Found {len(qr_elements)} elements with selector {selector}")
-                if qr_elements:
-                    qr_element = qr_elements[0]
-                    break
-            
-            if not qr_element:
-                self.logger.warning("⚠️ No QR code found, retrying...")
-                driver.refresh()
-                time.sleep(3)
-                continue
-            
-            # Get QR code data
-            qr_data = driver.execute_script("""
-                var canvas = arguments[0];
-                var ctx = canvas.getContext('2d');
-                var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                var pixels = imgData.data;
-                var qrCodeData = '';
-                for (var y = 0; y < canvas.height; y++) {
-                    for (var x = 0; x < canvas.width; x++) {
-                        var idx = (y * canvas.width + x) * 4;
-                        var isBlack = pixels[idx] < 128; // Simplified threshold
-                        qrCodeData += isBlack ? '1' : '0';
-                    }
-                }
-                return qrCodeData;
-            """, qr_element)
-            
-            # Generate and log ASCII QR code with version control
-            try:
-                import qrcode
-                qr = qrcode.QRCode(version=10, box_size=1, border=1)  # Force lower version for ASCII
-                qr.add_data(qr_data)
-                qr.make(fit=True)
-                self.logger.info("📱 ASCII QR Code (scan this with WhatsApp):")
-                qr.print_ascii()
-            except ValueError as e:
-                self.logger.error(f"❌ Failed to generate ASCII QR code: {e}. Trying with default version...")
+            for attempt in range(max_attempts):
+                self.logger.info(f"🔄 QR authentication attempt {attempt + 1}/{max_attempts}")
+                
+                # Look for QR code with multiple selectors
+                selectors = [
+                    'canvas[aria-label="Scan me!"]',
+                    'canvas',
+                    '[data-testid="qrcode"]',
+                    'div[data-testid="qr"] canvas'
+                ]
+                qr_element = None
+                for selector in selectors:
+                    self.logger.debug(f"Trying QR selector: {selector}")
+                    qr_elements = driver.find_elements("css selector", selector)
+                    self.logger.debug(f"Found {len(qr_elements)} elements with selector {selector}")
+                    if qr_elements:
+                        qr_element = qr_elements[0]
+                        break
+                
+                if not qr_element:
+                    self.logger.warning("⚠️ No QR code found, retrying...")
+                    driver.refresh()
+                    time.sleep(3)
+                    continue
+                
+                # Get QR code data
+                qr_data = driver.execute_script("""
+                    var canvas = arguments[0];
+                    return canvas.toDataURL();
+                """, qr_element)
+                
+                # Log QR code base64 data
+                self.logger.info(f"📱 QR code base64 data: {qr_data[:100]}... (full length: {len(qr_data)})")
+                
+                # Generate and log ASCII QR code with version control
                 try:
-                    qr = qrcode.QRCode(version=1, box_size=1, border=1)
-                    qr.add_data(qr_data[:1000])  # Truncate data for smaller QR
+                    import qrcode
+                    qr = qrcode.QRCode(version=10, box_size=1, border=1)  # Force lower version for ASCII
+                    qr.add_data(qr_data)
                     qr.make(fit=True)
-                    self.logger.info("📱 ASCII QR Code (scan this with WhatsApp, truncated):")
+                    self.logger.info("📱 ASCII QR Code (scan this with WhatsApp):")
                     qr.print_ascii()
+                except ValueError as e:
+                    self.logger.error(f"❌ Failed to generate ASCII QR code: {e}. Trying with truncated data...")
+                    try:
+                        qr = qrcode.QRCode(version=1, box_size=1, border=1)
+                        qr.add_data(qr_data[:1000])  # Truncate data for smaller QR code
+                        qr.make(fit=True)
+                        self.logger.info("📱 ASCII QR Code (truncated, scan this with WhatsApp):")
+                        qr.print_ascii()
+                    except Exception as e:
+                        self.logger.error(f"❌ Failed to generate ASCII QR code with truncation: {e}")
                 except Exception as e:
-                    self.logger.error(f"❌ Failed to generate ASCII QR code with truncation: {e}")
-            except Exception as e:
-                self.logger.error(f"❌ Failed to generate ASCII QR code: {e}")
+                    self.logger.error(f"❌ Failed to generate ASCII QR code: {e}")
+                
+                # Save QR code as image
+                qr_path = await self._save_qr_code(qr_data)
+                self.logger.info(f"📱 QR Code saved to: {qr_path}")
+                self.logger.info("📱 Please scan the ASCII QR code above or the saved image with your WhatsApp mobile app")
+                
+                # Save screenshot for debugging
+                driver.save_screenshot("/app/temp/screenshot.png")
+                self.logger.info(f"📸 Saved screenshot to /app/temp/screenshot.png")
+                
+                # Wait for authentication
+                authenticated = await self._wait_for_authentication(driver, timeout=60)
+                
+                if authenticated:
+                    self.logger.info("✅ QR code authentication successful!")
+                    return True
+                else:
+                    self.logger.warning("⏰ QR code authentication timed out")
             
-            # Save QR code as image
-            qr_path = await self._save_qr_code(qr_data)
-            self.logger.info(f"📱 QR Code saved to: {qr_path}")
-            self.logger.info("📱 Please scan the ASCII QR code above or the saved image with your WhatsApp mobile app")
+            self.logger.error("❌ QR authentication failed after all attempts")
+            return False
             
-            # Save screenshot for debugging
-            driver.save_screenshot("/app/temp/screenshot.png")
-            self.logger.info("📸 Saved screenshot to /app/temp/screenshot.png")
-            
-            # Wait for authentication
-            authenticated = await self._wait_for_authentication(driver, timeout=60)
-            
-            if authenticated:
-                self.logger.info("✅ QR code authentication successful!")
-                return True
-            else:
-                self.logger.warning("⏰ QR code authentication timed out")
-        
-        self.logger.error("❌ QR authentication failed after all attempts")
-        return False
-    
-    except Exception as e:
-        self.logger.error(f"❌ QR authentication error: {e}")
-        return False
+        except Exception as e:
+            self.logger.error(f"❌ QR authentication error: {e}")
+            return False
 
     async def _authenticate_phone(self, driver) -> bool:
         """Authenticate using phone number"""
@@ -160,11 +153,11 @@ async def _authenticate_qr(self, driver) -> bool:
                         reload_buttons[0].click()
                         time.sleep(2)
                 
-                time.sleep(2)
+                time.sleep(1)
                 
             except Exception as e:
                 self.logger.debug(f"Waiting for auth: {e}")
-                time.sleep(2)
+                time.sleep(1)
         
         return False
 
@@ -207,7 +200,7 @@ async def _authenticate_qr(self, driver) -> bool:
         except Exception as e:
             self.logger.error(f"❌ Failed to save session: {e}")
 
-    async def _load_session(self):
+    async def _load_session(self, driver):
         """Load existing session"""
         try:
             session_file = Path(self.config.whatsapp.session_dir) / "session.json"
@@ -253,7 +246,7 @@ async def _authenticate_qr(self, driver) -> bool:
             driver.delete_all_cookies()
             
             self.authenticated = False
-            self.logger.info("🚪 Logged out")
+            self.logger.info("🚪 Logged out successfully")
             
         except Exception as e:
             self.logger.error(f"❌ Logout error: {e}")
