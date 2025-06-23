@@ -1,5 +1,5 @@
 """
-WhatsApp UserBot with improved error handling and compatibility
+WhatsApp UserBot with improved error handling, authentication, and debugging
 """
 
 import asyncio
@@ -49,7 +49,9 @@ class WhatsAppUserBot:
             'qr_code': '[data-testid="qrcode"]',
             'chat_list': '[data-testid="chat-list"]',
             'message_input': '[data-testid="conversation-compose-box-input"]',
-            'messages': '[data-testid="msg-container"]'
+            'messages': '[data-testid="msg-container"]',
+            'search_bar': '[data-testid="chat-list-search"]',
+            'main_container': '[data-testid="wa-web-main-container"]'
         }
         self.logger.info("🤖 WhatsAppUserBot initialized")
 
@@ -65,11 +67,18 @@ class WhatsAppUserBot:
             self.logger.info("✅ Components initialized")
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize components: {e}")
+            self.stats['errors'] += 1
 
     async def start(self):
         """Start the WhatsApp bot"""
         self.logger.info("🚀 Starting WhatsApp UserBot...")
         try:
+            # Clear old session data
+            session_file = Path(self.config.whatsapp.session_dir) / "session.json"
+            if session_file.exists():
+                session_file.unlink()
+                self.logger.info("🗑️ Cleared old session file.")
+
             self.driver = await self.webdriver_manager.setup_driver()
             if not self.driver:
                 raise Exception("Failed to setup WebDriver")
@@ -88,21 +97,35 @@ class WhatsAppUserBot:
             await asyncio.gather(*tasks, return_exceptions=True)
         except Exception as e:
             self.logger.error(f"❌ Failed to start bot: {e}")
+            self.stats['errors'] += 1
             await self.shutdown()
 
     async def _authenticate(self):
         """Authenticate with WhatsApp Web"""
         self.logger.info("🔐 Authenticating with WhatsApp Web...")
-        try:
-            if self.auth_manager:
-                return await self.auth_manager.authenticate(self.driver)
-            raise Exception("AuthenticationManager not initialized")
-        except Exception as e:
-            self.logger.error(f"❌ Authentication failed: {e}")
-            return False
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if self.auth_manager:
+                    success = await self.auth_manager.authenticate(self.driver)
+                    if success:
+                        return True
+                    self.logger.warning(f"Authentication attempt {attempt + 1}/{max_retries} failed.")
+                else:
+                    raise Exception("AuthenticationManager not initialized")
+            except Exception as e:
+                self.logger.error(f"❌ Authentication attempt {attempt + 1} failed: {e}")
+                self.stats['errors'] += 1
+                if attempt < max_retries - 1:
+                    self.logger.info("🔄 Retrying authentication...")
+                    await asyncio.sleep(5)
+                    self.driver.delete_all_cookies()
+                    self.driver.get("https://web.whatsapp.com")
+        self.logger.error("❌ All authentication attempts failed.")
+        return False
 
     async def _monitor_messages(self):
-        """Monitor messages"""
+        """Monitor incoming messages"""
         self.logger.info("👂 Starting message monitoring...")
         while self.running:
             try:
@@ -114,9 +137,11 @@ class WhatsAppUserBot:
                         if message_data:
                             await self.message_queue.put(message_data)
                             self.processed_messages.add(message_id)
+                            self.stats['messages_received'] += 1
                 await asyncio.sleep(2)
             except Exception as e:
                 self.logger.error(f"❌ Error monitoring messages: {e}")
+                self.stats['errors'] += 1
                 await asyncio.sleep(10)
 
     async def _extract_message_data(self, message_element):
@@ -150,7 +175,6 @@ class WhatsAppUserBot:
         while self.running:
             try:
                 message = await asyncio.wait_for(self.message_queue.get(), timeout=1.0)
-                self.stats['messages_received'] += 1
                 if self.telegram_bridge:
                     await self.telegram_bridge.forward_message(message)
             except asyncio.TimeoutError:
@@ -160,18 +184,22 @@ class WhatsAppUserBot:
                 self.stats['errors'] += 1
 
     async def send_message(self, chat: str, message: str):
-        """Send message"""
+        """Send message to a chat"""
         try:
-            search_box = self.driver.find_element(By.CSS_SELECTOR, '[data-testid="chat-list-search"]')
+            search_box = WebDriverWait(self.driver, 10).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, self.selectors['search_bar']))
+            )
             search_box.click()
             search_box.clear()
             search_box.send_keys(chat)
             await asyncio.sleep(2)
-            chat_element = self.driver.find_element(By.CSS_SELECTOR, '[data-testid="chat-list"] > div')
+            chat_element = WebDriverWait(self.driver, 10).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, f'{self.selectors["chat_list"]} > div'))
+            )
             chat_element.click()
             await asyncio.sleep(1)
             input_box = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, '[data-testid="conversation-compose-box-input"]'))
+                EC.element_to_be_clickable((By.CSS_SELECTOR, self.selectors['message_input']))
             )
             input_box.click()
             input_box.send_keys(message)
@@ -181,14 +209,19 @@ class WhatsAppUserBot:
             return True
         except Exception as e:
             self.logger.error(f"❌ Failed to send message: {e}")
+            self.stats['errors'] += 1
             return False
 
     async def shutdown(self):
         """Shutdown bot"""
         self.logger.info("🛑 Shutting down bot...")
         self.running = False
-        if self.telegram_bridge:
-            await self.telegram_bridge.shutdown()
-        if self.webdriver_manager:
-            self.webdriver_manager.cleanup()
-        self.logger.info("✅ Bot shutdown complete")
+        try:
+            if self.telegram_bridge:
+                await self.telegram_bridge.shutdown()
+            if self.webdriver_manager:
+                self.webdriver_manager.cleanup()
+            self.logger.info("✅ Bot shutdown complete")
+        except Exception as e:
+            self.logger.error(f"❌ Error during shutdown: {e}")
+            self.stats['errors'] += 1
