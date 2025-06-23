@@ -8,7 +8,7 @@ import json
 import base64
 from pathlib import Path
 from typing import Dict, Any, Optional
-
+import qrcode # Import qrcode library
 
 class AuthenticationManager:
     def __init__(self, config, logger, telegram_bridge=None):
@@ -70,80 +70,74 @@ class AuthenticationManager:
                         break
                 
                 if not qr_element:
-                    self.logger.warning("⚠️ No QR code found, retrying...")
+                    self.logger.warning("⚠️ No QR code element found, retrying...")
                     driver.refresh()
                     time.sleep(3)
                     continue
                 
-                # Get QR code data (use data-ref if available, else toDataURL)
-                qr_data = None
+                # Get QR code data (prioritize data-ref, then toDataURL)
+                qr_data_ref = qr_element.get_attribute("data-ref")
+                qr_data_url = None
                 try:
-                    qr_data = qr_element.get_attribute("data-ref") or driver.execute_script("""
+                    qr_data_url = driver.execute_script("""
                         var canvas = arguments[0];
-                        return canvas.toDataURL();
+                        if (canvas && typeof canvas.toDataURL === 'function') {
+                            return canvas.toDataURL();
+                        }
+                        return null;
                     """, qr_element)
                 except Exception as e:
-                    self.logger.debug(f"Failed to get QR data: {e}")
-                
-                if not qr_data:
-                    self.logger.warning("⚠️ No QR code data retrieved, retrying...")
+                    self.logger.debug(f"Failed to get QR data from canvas.toDataURL(): {e}")
+
+                qr_data_to_encode = qr_data_ref if qr_data_ref else qr_data_url
+
+                if not qr_data_to_encode:
+                    self.logger.warning("⚠️ No QR code data retrieved (data-ref or toDataURL), retrying...")
                     driver.refresh()
                     time.sleep(3)
                     continue
                 
-                # Log QR code base64 data if toDataURL was used
-                if qr_data.startswith("data:image/png;base64,"):
-                    self.logger.info(f"📱 QR code base64 data: {qr_data[:100]}... (full length: {len(qr_data)})")
+                # Log QR code data type and length
+                self.logger.info(f"📱 QR code data retrieved. Type: {'data-ref' if qr_data_ref else 'toDataURL'}, Length: {len(qr_data_to_encode)}")
+
+                # Save QR code as image
+                qr_path = await self._save_qr_code(qr_data_to_encode, qr_data_ref is not None)
+                self.logger.info(f"📱 QR Code saved to: {qr_path}")
                 
-                # Generate and log compact ASCII QR code
+                # Generate and log compact ASCII QR code (for terminal viewing, not scanning)
                 try:
-                    import qrcode
-                    qr = qrcode.QRCode(
+                    # Use a short portion for ASCII to keep it compact
+                    ascii_data = qr_data_ref if qr_data_ref else qr_data_to_encode[:100]
+                    qr_ascii = qrcode.QRCode(
                         version=1,
                         box_size=1,
                         border=0,
                         error_correction=qrcode.constants.ERROR_CORRECT_L
                     )
-                    qr.add_data(qr_data[:500])  # Limit data to ensure small size
-                    qr.make(fit=True)
-                    self.logger.info("📱 Compact ASCII QR Code (scan this with WhatsApp):")
-                    qr.print_ascii(invert=True)
+                    qr_ascii.add_data(ascii_data)
+                    qr_ascii.make(fit=True)
+                    self.logger.info("📱 Compact ASCII QR Code (for reference, may not be scannable):")
+                    qr_ascii.print_ascii(invert=True)
                 except Exception as e:
-                    self.logger.error(f"❌ Failed to generate ASCII QR code: {e}. Trying with minimal data...")
-                    try:
-                        qr = qrcode.QRCode(
-                            version=1,
-                            box_size=1,
-                            border=0,
-                            error_correction=qrcode.constants.ERROR_CORRECT_L
-                        )
-                        qr.add_data(qr_data[:200])  # Further truncate
-                        qr.make(fit=True)
-                        self.logger.info("📱 Minimal ASCII QR Code (scan this with WhatsApp):")
-                        qr.print_ascii(invert=True)
-                    except Exception as e:
-                        self.logger.error(f"❌ Failed to generate minimal ASCII QR code: {e}")
-                
-                # Save QR code as image
-                qr_path = await self._save_qr_code(qr_data)
-                self.logger.info(f"📱 QR Code saved to: {qr_path}")
-                
-                # Send QR code to Telegram via TelegramBridge
+                    self.logger.error(f"❌ Failed to generate ASCII QR code: {e}")
+
+                # Send QR code image to Telegram via TelegramBridge
                 if self.telegram_bridge and qr_path != "QR code could not be saved":
                     try:
                         await self.telegram_bridge.forward_qr_code(qr_path)
-                        self.logger.info("📤 QR code sent to Telegram bot successfully")
+                        self.logger.info("📤 QR code image sent to Telegram bot successfully")
                     except Exception as e:
-                        self.logger.error(f"❌ Failed to send QR code to Telegram: {e}")
+                        self.logger.error(f"❌ Failed to send QR code image to Telegram: {e}")
                 
-                self.logger.info("📱 Please scan the ASCII QR code above, the saved image, or check your Telegram bot")
+                self.logger.info("📱 Please scan the generated QR code image (either from file or Telegram) with your WhatsApp mobile app")
                 
                 # Save screenshot for debugging
-                driver.save_screenshot("/app/temp/screenshot.png")
-                self.logger.info(f"📸 Saved screenshot to /app/temp/screenshot.png")
+                screenshot_path = Path("/app/temp/screenshot.png")
+                driver.save_screenshot(str(screenshot_path))
+                self.logger.info(f"📸 Saved screenshot to {screenshot_path}")
                 
                 # Wait for authentication
-                authenticated = await self._wait_for_authentication(driver, timeout=60)
+                authenticated = await self._wait_for_authentication(driver, timeout=90) # Increased timeout
                 
                 if authenticated:
                     self.logger.info("✅ QR code authentication successful!")
@@ -170,19 +164,24 @@ class AuthenticationManager:
         
         while time.time() - start_time < timeout:
             try:
+                # Check for elements indicating successful login (e.g., chat list)
                 chats = driver.find_elements("css selector", "[data-testid='chat-list']")
                 if chats:
+                    self.logger.info("✅ Chat list found, authentication likely successful.")
                     return True
                 
+                # Check for QR code expiration/reload
                 qr_elements = driver.find_elements("css selector", "canvas")
                 if not qr_elements:
+                    # If canvas is gone, it might be authenticated or an error
+                    self.logger.debug("QR canvas not found, checking for reload button or chat list.")
                     reload_buttons = driver.find_elements("css selector", "[data-testid='qr-reload']")
                     if reload_buttons:
                         self.logger.info("🔄 QR code expired, clicking reload...")
                         reload_buttons[0].click()
-                        time.sleep(2)
+                        time.sleep(2) # Give some time for new QR to load
                 
-                time.sleep(1)
+                time.sleep(1) # Short delay to avoid busy-waiting
                 
             except Exception as e:
                 self.logger.debug(f"Waiting for auth: {e}")
@@ -190,7 +189,7 @@ class AuthenticationManager:
         
         return False
 
-    async def _save_qr_code(self, qr_data: str) -> str:
+    async def _save_qr_code(self, qr_data: str, is_data_ref: bool) -> str:
         """Save QR code data as image"""
         try:
             temp_dir = Path("./temp")
@@ -198,10 +197,28 @@ class AuthenticationManager:
             
             qr_path = temp_dir / "whatsapp_qr.png"
             
-            if qr_data.startswith("data:image/png;base64,"):
+            if is_data_ref:
+                # If it's a data-ref string, use qrcode library to generate image
+                self.logger.debug(f"Saving QR code from data-ref: {qr_data}")
+                qr = qrcode.QRCode(
+                    version=1,
+                    error_correction=qrcode.constants.ERROR_CORRECT_L,
+                    box_size=10, # Standard size for good scannability
+                    border=4,
+                )
+                qr.add_data(qr_data)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black", back_color="white")
+                img.save(qr_path)
+            elif qr_data.startswith("data:image/png;base64,"):
+                # If it's a base64 data URL, decode and save
+                self.logger.debug("Saving QR code from base64 data URL.")
                 base64_data = qr_data.split(",")[1]
                 with open(qr_path, "wb") as f:
                     f.write(base64.b64decode(base64_data))
+            else:
+                self.logger.error(f"❌ Unknown QR data format: {qr_data[:50]}")
+                return "QR code could not be saved due to unknown format"
             
             return str(qr_path)
             
@@ -240,22 +257,31 @@ class AuthenticationManager:
             with open(session_file, 'r') as f:
                 session_data = json.load(f)
             
-            if time.time() - session_data.get('timestamp', 0) > 86400:
+            if time.time() - session_data.get('timestamp', 0) > 86400: # Session valid for 24 hours
                 self.logger.info("📅 Session expired, need fresh authentication")
                 return False
             
             driver.get("https://web.whatsapp.com")
             
             for cookie in session_data.get('cookies', []):
-                try:
-                    driver.add_cookie(cookie)
-                except Exception as e:
-                    self.logger.debug(f"Could not add cookie: {e}")
+                # Ensure the cookie domain is correct for WhatsApp Web
+                # Selenium might add cookies incorrectly if domain is not exact
+                if 'domain' in cookie and 'whatsapp.com' in cookie['domain']:
+                    try:
+                        driver.add_cookie(cookie)
+                    except Exception as e:
+                        self.logger.debug(f"Could not add cookie: {e}")
             
             driver.refresh()
             time.sleep(3)
             
-            return True
+            # Verify if session loaded successfully by checking for chat list
+            if driver.find_elements("css selector", "[data-testid='chat-list']"):
+                self.logger.info("✅ Session loaded and appears valid.")
+                return True
+            else:
+                self.logger.info("❌ Session loaded but chat list not found, likely expired or invalid.")
+                return False
             
         except Exception as e:
             self.logger.debug(f"Could not load session: {e}")
