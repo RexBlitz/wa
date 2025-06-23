@@ -20,7 +20,7 @@ from selenium.common.exceptions import (
     SessionNotCreatedException
 )
 
-# Import your other modules (make sure these files exist)
+# Import your other modules
 try:
     from .telegram_bridge import TelegramBridge
 except ImportError:
@@ -77,7 +77,7 @@ class WhatsAppUserBot:
         self.telegram_bridge = TelegramBridge(config, logger) if TelegramBridge and hasattr(config, 'telegram') and config.telegram.enabled else None
         self.module_manager = ModuleManager(config, logger) if ModuleManager else None
         self.message_handler = MessageHandler(config, logger) if MessageHandler else None
-        self.auth_manager = AuthenticationManager(config, logger) if AuthenticationManager else None
+        self.auth_manager = AuthenticationManager(config, logger, self.telegram_bridge) if AuthenticationManager else None
         self.webdriver_manager = WebDriverManager(config, logger)
         
         # Message queue and processing
@@ -96,7 +96,7 @@ class WhatsAppUserBot:
         
         # WhatsApp Web selectors (updated for 2025)
         self.selectors = {
-            'qr_code': 'canvas[aria-label="Scan me!"], canvas, [data-testid="qrcode"]',
+            'qr_code': '[data-testid="qrcode"], canvas[aria-label="Scan me!"], canvas',
             'chat_list': '[data-testid="chat-list"], [role="grid"]',
             'search_box': '[data-testid="chat-list-search"], [placeholder*="Search"]',
             'message_input': '[data-testid="conversation-compose-box-input"], [contenteditable="true"][data-tab="10"]',
@@ -105,6 +105,7 @@ class WhatsAppUserBot:
             'message_text': '.selectable-text, [data-testid="conversation-text"]'
         }
 
+    # Rest of the bot.py remains unchanged
     async def initialize(self):
         """Initialize all bot components with better error handling"""
         self.logger.info("🔧 Initializing bot components...")
