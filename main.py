@@ -28,10 +28,10 @@ class UserBotManager:
         """Initialize the userbot with configuration and logging"""
         try:
             print_banner()
-            self.logger = setup_logger(self.config)
-            self.logger.info("🚀 Initializing Advanced WhatsApp UserBot...")
             self.config = Config()
             await self.config.load()
+            self.logger = setup_logger(self.config)
+            self.logger.info("🚀 Initializing Advanced WhatsApp UserBot...")
             self.logger.debug(f"Config loaded: {self.config.__dict__}")
             self.bot = WhatsAppUserBot(self.config, self.logger)
             await self.bot.initialize()
@@ -92,7 +92,8 @@ class UserBotManager:
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals"""
-        self.logger.info(f"📝 Received signal {signum}, shutting down...")
+        if self.logger:
+            self.logger.info(f"📝 Received signal {signum}, shutting down...")
         self.running = False
 
     async def shutdown(self):
