@@ -14,8 +14,8 @@ whatsapp:
   implicit_wait: 10
   page_load_timeout: 60
 webdriver:
-  chrome_binary: "/usr/bin/chromium-browser"
-  driver_path: "/usr/bin/chromium-chromedriver"
+  chrome_binary: "/usr/bin/chromium"
+  driver_path: "/usr/bin/chromedriver"
   headless: true
 telegram:
   enabled: true
@@ -43,8 +43,8 @@ modules:
   custom_modules_dir: "./modules/custom"
   enabled_modules: []
 logging:
-  level: "INFO"
-  file: "./logs/userbot.log"
+  level: "DEBUG"
+  file: "/app/logs/userbot.log"
   max_size: "10MB"
   backup_count: 5
   console_output: true
