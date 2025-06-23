@@ -1,6 +1,6 @@
 """
 Authentication manager for WhatsApp UserBot
-Handles login, session management, and authentication methods with improved robustness
+Handles login, session management, and authentication with popup handling
 """
 
 import time
@@ -169,7 +169,7 @@ class AuthenticationManager:
         return await self._authenticate_qr(driver)
 
     async def _wait_for_authentication(self, driver, timeout: int = 120) -> bool:
-        """Wait for authentication to complete with enhanced robustness"""
+        """Wait for authentication to complete with popup handling"""
         start_time = time.time()
         self.logger.info(f"⏳ Waiting for authentication (timeout: {timeout} seconds)")
 
@@ -179,16 +179,46 @@ class AuthenticationManager:
             '[data-testid="wa-web-main-container"]',
             '[data-testid="conversation-panel"]',
             'div[role="main"]',
-            '[data-testid="intro-title"]'
+            '[data-testid="intro-title"]',
+            '[data-testid="chat-panel"]',
+            'div[role="complementary"]',
+            '[data-testid="app-container"]'
         ]
         loading_indicators = [
             '[data-testid="loading-spinner"]',
             'div[role="progressbar"]',
-            '[data-testid="wa-connection-error"]'
+            '[data-testid="wa-connection-error"]',
+            'div.loading'
         ]
+        popup_selector = 'button:contains("Continue")'  # Approximate selector for the Continue button
 
         while time.time() - start_time < timeout:
             try:
+                # Check page readiness
+                page_state = driver.execute_script("return document.readyState;")
+                self.logger.debug(f"Page readyState: {page_state}")
+                if page_state != "complete":
+                    self.logger.debug("Page not fully loaded, waiting...")
+                    time.sleep(2)
+                    continue
+
+                # Check for and dismiss the Continue popup
+                try:
+                    continue_button = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, popup_selector))
+                    )
+                    self.logger.info("📣 Found Continue popup, clicking...")
+                    continue_button.click()
+                    time.sleep(2)  # Wait for page to update after clicking
+                    screenshot_path = Path(f"/app/temp/popup_dismissed_{int(time.time())}.png")
+                    driver.save_screenshot(str(screenshot_path))
+                    self.logger.info(f"📸 Saved popup dismissal screenshot to {screenshot_path}")
+                    if self.telegram_bridge:
+                        await self.telegram_bridge.forward_qr_code(str(screenshot_path))
+                        self.logger.info("📤 Sent popup dismissal screenshot to Telegram")
+                except (TimeoutException, NoSuchElementException):
+                    self.logger.debug("No Continue popup found")
+
                 # Check for loading/error states
                 for selector in loading_indicators:
                     try:
@@ -215,6 +245,12 @@ class AuthenticationManager:
                         return True
                     except TimeoutException:
                         self.logger.debug(f"Selector {selector} not found")
+
+                # Log visible elements for debugging
+                visible_elements = driver.execute_script(
+                    "return Array.from(document.querySelectorAll('*')).filter(e => e.offsetHeight > 0 && window.getComputedStyle(e).display !== 'none').map(e => ({tag: e.tagName, id: e.id, class: e.className, testid: e.getAttribute('data-testid')}));"
+                )
+                self.logger.debug(f"Visible elements (top 5): {visible_elements[:5]}")
 
                 # Check for QR code or reload
                 qr_elements = driver.find_elements(By.CSS_SELECTOR, "canvas")
@@ -331,7 +367,7 @@ class AuthenticationManager:
                 try:
                     driver.add_cookie(cookie)
                 except Exception as e:
-                    self.logger.debug(f"Could not add cookie {cookie.get('name')}: {e}")
+                    self.logger.debug(f"Could not load cookie {cookie.get('name')}: {e}")
 
             driver.refresh()
             time.sleep(3)
