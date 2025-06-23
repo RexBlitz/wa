@@ -1,0 +1,35 @@
+# WhatsApp automation
+selenium==4.16.0
+webdriver-manager==4.0.1
+qrcode[pil]==7.4.2
+Pillow==10.1.0
+
+# Telegram integration
+python-telegram-bot==20.7
+asyncio-telegram-bot==20.7
+
+# Database
+motor==3.3.2
+pymongo==4.6.0
+
+# Async and utilities
+asyncio==3.4.3
+aiofiles==23.2.1
+aiohttp==3.9.1
+
+# Configuration and logging
+python-dotenv==1.0.0
+pyyaml==6.0.1
+colorlog==6.8.0
+
+# Image processing and utilities
+opencv-python==4.8.1.78
+numpy==1.25.2
+requests==2.31.0
+beautifulsoup4==4.12.2
+
+# Development
+pytest==7.4.3
+pytest-asyncio==0.21.1
+black==23.11.0
+flake8==6.1.0
