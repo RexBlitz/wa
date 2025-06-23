@@ -3,11 +3,18 @@ import asyncio
 from pathlib import Path
 from typing import Dict, Any, Optional
 import json
+import logging # Import logging module
+
+# Configure logging for this module
+logger = logging.getLogger(__name__)
+# Basic configuration, you might want to integrate this with your main bot's logger
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
 
 class TelegramBridge:
-    def __init__(self, config, logger):
+    def __init__(self, config, logger_instance):
         self.config = config
-        self.logger = logger
+        self.logger = logger_instance # Use the logger instance passed from the bot
         self.bot = None
         self.group_chat_id = None
         self.enabled = False
@@ -42,7 +49,9 @@ class TelegramBridge:
                 await self._load_message_map()
 
                 # Optional: Send a startup message
-                await self.send_message_to_group("WhatsApp UserBot started and Telegram bridge is active! Waiting for messages...")
+                # This message might interfere with the initial QR code sending if sent too early.
+                # Consider sending it after successful WhatsApp login.
+                # await self.send_message_to_group("WhatsApp UserBot started and Telegram bridge is active! Waiting for messages...")
                 
             except Exception as e:
                 self.logger.error(f"❌ Failed to initialize Telegram bot: {e}")
@@ -107,6 +116,11 @@ class TelegramBridge:
         """Sends a text message to the configured Telegram group."""
         if self.enabled and self.bot and self.group_chat_id:
             try:
+                # Telegram API limits message length to 4096 characters for MarkdownV2
+                if len(text) > 4096:
+                    self.logger.warning(f"Message too long ({len(text)} chars). Truncating for Telegram.")
+                    text = text[:4090] + "..." # Truncate and add ellipsis
+
                 message = await self.bot.send_message(
                     chat_id=self.group_chat_id,
                     text=text,
@@ -117,7 +131,7 @@ class TelegramBridge:
                 self.logger.debug(f"Sent Telegram message to group: {text[:50]}...")
                 return message.message_id
             except Exception as e:
-                self.logger.error(f"❌ Failed to send Telegram message to group: {e}")
+                self.logger.error(f"❌ Failed to send Telegram message to group (Chat ID: {self.group_chat_id}): {e}")
         elif not self.enabled:
             self.logger.debug("Telegram bridge not enabled, skipping message send.")
         return None
@@ -131,12 +145,16 @@ class TelegramBridge:
                     with open(qr_file, 'rb') as f:
                         await self.bot.send_photo(chat_id=self.group_chat_id, photo=f, caption="WhatsApp QR Code for login")
                     self.logger.info(f"✅ QR code image sent to Telegram: {qr_image_path}")
+                    return True # Indicate success
                 else:
                     self.logger.error(f"❌ QR code image file not found: {qr_image_path}")
+                    return False
             except Exception as e:
                 self.logger.error(f"❌ Failed to send QR code image to Telegram: {e}")
+                return False
         elif not self.enabled:
             self.logger.debug("Telegram bridge not enabled, skipping QR code send.")
+        return False
 
     async def forward_whatsapp_message(self, message_data: Dict[str, Any]):
         """Forwards a WhatsApp message to Telegram, attempting to use threads/replies."""
@@ -157,11 +175,12 @@ class TelegramBridge:
                 # Check if we already have a Telegram thread/topic for this WhatsApp chat
                 if whatsapp_chat_id in self.whatsapp_to_telegram_map:
                     telegram_thread_id = self.whatsapp_to_telegram_map[whatsapp_chat_id].get('telegram_thread_id')
-                # If not, Telegram's API will create a new topic if group_chat_id is a supergroup and message_thread_id is absent
-                # or it will just post to the main group.
-                # For a new topic, you'd typically need to explicitly create it first and get its ID.
-                # For this basic implementation, we'll try to rely on direct replies or main group.
-                # If `telegram_thread_id` is None, it will post to the main group.
+                # If not, for the first message, we send it to the main group, and if a topic is created,
+                # we'd ideally get its ID from the Telegram API response (send_message creates topic if message_thread_id is absent in a supergroup).
+                # However, Telegram's API for `send_message` doesn't return the new topic ID directly when it creates one implicitly.
+                # For explicit topic creation and getting its ID, you'd need `createForumTopic`.
+                # For simplicity here, we'll rely on `reply_to_message_id` for subsequent messages in the same thread.
+                # If `telegram_thread_id` is None, it will post to the main group or create a new topic if `thread_per_user` is true and this is the first message.
             
             # Formulate the message to send to Telegram (MarkdownV2)
             formatted_message = (
@@ -189,7 +208,7 @@ class TelegramBridge:
                 if whatsapp_chat_id not in self.whatsapp_to_telegram_map:
                     self.whatsapp_to_telegram_map[whatsapp_chat_id] = {
                         'telegram_chat_id': self.group_chat_id,
-                        'telegram_thread_id': telegram_thread_id # Will be None if not using explicit topics
+                        'telegram_thread_id': telegram_thread_id # Will be None if not using explicit topics, or if it's the main group
                     }
                 await self._save_message_map()
                 self.logger.info(f"WhatsApp message forwarded to Telegram (Msg ID: {telegram_message_id}).")
@@ -202,7 +221,9 @@ class TelegramBridge:
     def _escape_markdown_v2(self, text: str) -> str:
         """Helper to escape characters for MarkdownV2 parse mode."""
         # See https://core.telegram.org/bots/api#markdownv2-style
-        escape_chars = '_*[]()~`>#+-=|{}.!' # These need to be escaped
+        # Escapes characters that have special meaning in MarkdownV2.
+        # This list includes all characters from the documentation that need escaping.
+        escape_chars = '_*[]()~`>#+-=|{}.!' # These need to be escaped with a backslash
         return ''.join(['\\' + char if char in escape_chars else char for char in text])
 
     async def get_whatsapp_details_for_telegram_reply(self, telegram_message_id: int):
