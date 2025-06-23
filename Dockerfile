@@ -45,4 +45,4 @@ ENV CHROME_BIN=/usr/bin/chromium
 ENV CHROMEDRIVER_BIN=/usr/bin/chromedriver
 
 # Run the bot with Xvfb for headless browsing
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1024x768x24 & python bot.py"]
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1024x768x24 & python main.py"]
