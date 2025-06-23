@@ -9,19 +9,16 @@ import os
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
-from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 
 from .telegram_bridge import TelegramBridge
 from .database import DatabaseManager
 from .module_manager import ModuleManager
 from .message_handler import MessageHandler
 from .auth import AuthenticationManager
+from .webdriver_manager import WebDriverManager
 from utils.qr_generator import generate_qr_code
 
 
@@ -38,6 +35,7 @@ class WhatsAppUserBot:
         self.module_manager = ModuleManager(config, logger)
         self.message_handler = MessageHandler(config, logger)
         self.auth_manager = AuthenticationManager(config, logger)
+        self.webdriver_manager = WebDriverManager(config, logger)
         
         # Message queue and processing
         self.message_queue = asyncio.Queue()
@@ -80,8 +78,19 @@ class WhatsAppUserBot:
     async def start(self):
         """Start the WhatsApp bot"""
         try:
-            # Setup WebDriver
-            await self._setup_webdriver()
+            # Setup WebDriver with enhanced compatibility
+            self.driver = await self.webdriver_manager.setup_driver()
+            
+            if not self.driver:
+                raise Exception("Failed to setup WebDriver with all available methods")
+            
+            # Log driver information
+            driver_info = self.webdriver_manager.get_driver_info()
+            self.logger.info(f"🌐 WebDriver Info: {driver_info}")
+            
+            # Set timeouts
+            self.driver.implicitly_wait(self.config.whatsapp.implicit_wait)
+            self.driver.set_page_load_timeout(self.config.whatsapp.page_load_timeout)
             
             # Authenticate with WhatsApp
             if not await self._authenticate():
@@ -104,42 +113,6 @@ class WhatsAppUserBot:
                 
         except Exception as e:
             self.logger.error(f"❌ Failed to start bot: {e}")
-            raise
-
-    async def _setup_webdriver(self):
-        """Setup Chrome WebDriver for WhatsApp Web"""
-        self.logger.info("🌐 Setting up WebDriver...")
-        
-        try:
-            # Chrome options
-            chrome_options = Options()
-            chrome_options.add_argument(f"--user-agent={self.config.whatsapp.user_agent}")
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            chrome_options.add_experimental_option('useAutomationExtension', False)
-            
-            if self.config.whatsapp.headless:
-                chrome_options.add_argument("--headless")
-            
-            # Session directory
-            session_dir = Path(self.config.whatsapp.session_dir)
-            session_dir.mkdir(exist_ok=True)
-            chrome_options.add_argument(f"--user-data-dir={session_dir}")
-            
-            # Initialize driver
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
-            
-            # Set timeouts
-            self.driver.implicitly_wait(self.config.whatsapp.implicit_wait)
-            self.driver.set_page_load_timeout(self.config.whatsapp.page_load_timeout)
-            
-            self.logger.info("✅ WebDriver setup complete")
-            
-        except Exception as e:
-            self.logger.error(f"❌ Failed to setup WebDriver: {e}")
             raise
 
     async def _authenticate(self):
@@ -172,8 +145,8 @@ class WhatsAppUserBot:
         self.logger.info("📱 Waiting for QR code...")
         
         try:
-            # Wait for QR code element
-            qr_element = WebDriverWait(self.driver, 30).until(
+            # Wait for QR code element with longer timeout
+            qr_element = WebDriverWait(self.driver, 60).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "canvas"))
             )
             
@@ -188,8 +161,8 @@ class WhatsAppUserBot:
             self.logger.info(f"📱 QR Code saved to: {qr_path}")
             self.logger.info("📱 Scan the QR code with your WhatsApp mobile app")
             
-            # Wait for authentication
-            WebDriverWait(self.driver, 60).until(
+            # Wait for authentication with extended timeout
+            WebDriverWait(self.driver, 120).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid='chat-list']"))
             )
             
@@ -198,6 +171,13 @@ class WhatsAppUserBot:
             
         except Exception as e:
             self.logger.error(f"❌ QR authentication failed: {e}")
+            
+            # Try to restart driver and retry once
+            self.logger.info("🔄 Attempting to restart WebDriver and retry...")
+            if await self.webdriver_manager.restart_driver():
+                self.driver = self.webdriver_manager.driver
+                return await self._authenticate_with_qr()
+            
             return False
 
     async def _authenticate_with_phone(self):
@@ -210,7 +190,7 @@ class WhatsAppUserBot:
     async def _is_logged_in(self):
         """Check if already logged in to WhatsApp Web"""
         try:
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             chat_list = self.driver.find_elements(By.CSS_SELECTOR, "[data-testid='chat-list']")
             return len(chat_list) > 0
         except:
@@ -245,6 +225,14 @@ class WhatsAppUserBot:
                 
             except Exception as e:
                 self.logger.error(f"❌ Error monitoring messages: {e}")
+                
+                # Try to recover by restarting driver
+                if "no such window" in str(e).lower() or "session deleted" in str(e).lower():
+                    self.logger.info("🔄 Attempting to recover WebDriver session...")
+                    if await self.webdriver_manager.restart_driver():
+                        self.driver = self.webdriver_manager.driver
+                        await self._authenticate()
+                
                 await asyncio.sleep(5)
 
     async def _extract_message_data(self, message_element):
@@ -325,10 +313,13 @@ class WhatsAppUserBot:
         current_time = time.time()
         uptime = current_time - self.stats['start_time']
         
+        driver_info = self.webdriver_manager.get_driver_info()
+        
         return {
             **self.stats,
             'uptime': uptime,
-            'uptime_formatted': f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m {int(uptime % 60)}s"
+            'uptime_formatted': f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m {int(uptime % 60)}s",
+            'driver_info': driver_info
         }
 
     async def shutdown(self):
@@ -338,8 +329,7 @@ class WhatsAppUserBot:
         self.running = False
         
         # Close WebDriver
-        if self.driver:
-            self.driver.quit()
+        self.webdriver_manager.cleanup()
         
         # Shutdown components
         if self.telegram_bridge:
