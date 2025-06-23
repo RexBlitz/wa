@@ -33,7 +33,8 @@ RUN pip install --no-cache-dir \
     selenium \
     webdriver-manager \
     qrcode \
-    pillow
+    pillow \
+    pyyaml
 
 # Create directories for temp and sessions
 RUN mkdir -p /app/temp /app/sessions && \
