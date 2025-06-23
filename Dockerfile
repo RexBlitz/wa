@@ -25,16 +25,14 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Copy application code
-COPY . /app
+# Copy requirements file first to leverage caching
+COPY requirements.txt /app/requirements.txt
 
 # Install Python dependencies
-RUN pip install --no-cache-dir \
-    selenium \
-    webdriver-manager \
-    qrcode \
-    pillow \
-    pyyaml
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application code
+COPY . /app
 
 # Create directories for temp and sessions
 RUN mkdir -p /app/temp /app/sessions && \
