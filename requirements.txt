@@ -7,7 +7,7 @@ Pillow
 playwright
 # Telegram integration
 python-telegram-bot
-
+PyYAML
 # Database
 motor
 pymongo
