@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import qrcode # Import qrcode library
 import re # Import re for regex used in auth
-
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 class AuthenticationManager:
     def __init__(self, config, logger, telegram_bridge=None):
