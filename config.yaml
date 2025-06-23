@@ -4,30 +4,31 @@ bot:
   version: "2.0.0"
   debug: true
   auto_start: true
-  session_timeout: 3600  # 1 hour
-
+  session_timeout: 3600
 whatsapp:
-  auth_method: "qr"  # qr or phone
-  phone_number: "+923298784489"  # Optional: +1234567890
-  session_dir: "./sessions"
-  headless: false
-  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  auth_method: "qr"
+  phone_number: "+923298784489"
+  session_dir: "/app/sessions"
+  headless: true
+  user_agent: "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.7151.119 Safari/537.36"
   implicit_wait: 10
-  page_load_timeout: 30
-  
+  page_load_timeout: 60
+webdriver:
+  chrome_binary: "/usr/bin/chromium-browser"
+  driver_path: "/usr/bin/chromium-chromedriver"
+  headless: true
 telegram:
   enabled: true
-  bot_token: "7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI"  # Your Telegram bot token
-  bridge_group_id: "-1002287300661"  # Telegram group ID for bridging
-  admin_users: ["7405203657"]  # List of Telegram user IDs who can manage
+  bot_token: "7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI"
+  bridge_group_id: "-1002287300661"
+  admin_users: [7405203657]
   thread_per_user: true
   forward_media: true
   max_message_length: 4096
-
 database:
-  type: "mongodb"  # mongodb or local
+  type: "mongodb"
   mongodb:
-    connection_string: "mongodb+srv://irexanon:xUf7PCf9cvMHy8g6@rexdb.d9rwo.mongodb.net/?retryWrites=true&w=majority&appName=RexDB"  # MongoDB connection string
+    connection_string: "mongodb+srv://irexanon:xUf7PCf9cvMHy8g6@rexdb.d9rwo.mongodb.net/?retryWrites=true&w=majority&appName=RexDB"
     database_name: "whatsapp_userbot"
     collections:
       messages: "messages"
@@ -36,22 +37,19 @@ database:
       modules: "modules"
   local:
     db_file: "./data/userbot.db"
-
 modules:
   auto_load: true
   system_modules_dir: "./modules/system"
   custom_modules_dir: "./modules/custom"
   enabled_modules: []
-
 logging:
-  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "INFO"
   file: "./logs/userbot.log"
   max_size: "10MB"
   backup_count: 5
   console_output: true
-
 security:
-  rate_limit: 30  # messages per minute
+  rate_limit: 30
   blacklist: []
   whitelist: []
   admin_only_commands: true
