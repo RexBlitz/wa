@@ -1,253 +1,279 @@
 """
-Authentication manager for WhatsApp UserBot
-Handles login, session management, and authentication methods
+Telegram Bridge for WhatsApp UserBot
+Handles message forwarding and replies between WhatsApp and Telegram
 """
 
-import time
+import asyncio
 import json
-import base64
-from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, List, Optional, Any
+from telegram import Bot, Update, Message
+from telegram.ext import Application, MessageHandler, CommandHandler, filters
+from telegram.constants import ParseMode
 
 
-class AuthenticationManager:
+class TelegramBridge:
     def __init__(self, config, logger):
         self.config = config
         self.logger = logger
-        self.session_data = {}
-        self.authenticated = False
+        self.bot = None
+        self.application = None
+        self.running = False
+        self.user_threads = {}
+        self.thread_users = {}
+        self.message_mapping = {}
+        self.logger.info("🤖 TelegramBridge initialized")
 
-    async def authenticate(self, driver) -> bool:
-        """Main authentication method"""
-        self.logger.info("🔐 Starting authentication process...")
+    async def initialize(self):
+        """Initialize Telegram bot"""
+        if not self.config.telegram.bot_token:
+            self.logger.warning("🔸 Telegram bot token not configured, bridge disabled")
+            return
         
         try:
-            # Force QR code authentication
-            if self.config.whatsapp.auth_method == "qr":
-                success = await self._authenticate_qr(driver)
-            elif self.config.whatsapp.auth_method == "phone":
-                success = await self._authenticate_phone(driver)
+            self.logger.info("🤖 Initializing Telegram bridge...")
+            self.bot = Bot(token=self.config.telegram.bot_token)
+            self.application = Application.builder().token(self.config.telegram.bot_token).build()
+            self._setup_handlers()
+            bot_info = await self.bot.get_me()
+            self.logger.info(f"✅ Telegram bot connected: @{bot_info.username}")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Failed to initialize Telegram bridge: {e}")
+            raise
+
+    def _setup_handlers(self):
+        """Setup Telegram message handlers"""
+        self.logger.debug("📡 Setting up Telegram handlers")
+        self.application.add_handler(CommandHandler("start", self._handle_start))
+        self.application.add_handler(CommandHandler("help", self._handle_help))
+        self.application.add_handler(CommandHandler("stats", self._handle_stats))
+        self.application.add_handler(CommandHandler("users", self._handle_users))
+        self.application.add_handler(MessageHandler(
+            filters.TEXT & (~filters.COMMAND), 
+            self._handle_telegram_message
+        ))
+
+    async def start(self):
+        """Start the Telegram bridge"""
+        if not self.bot:
+            self.logger.warning("⚠️ Telegram bot not initialized")
+            return
+        
+        try:
+            self.logger.info("📡 Starting Telegram bridge...")
+            self.running = True
+            await self.application.initialize()
+            await self.application.start()
+            await self._send_startup_notification()
+            self.logger.info("✅ Telegram bridge started successfully")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Failed to start Telegram bridge: {e}")
+
+    async def forward_message(self, whatsapp_message: Dict[str, Any]):
+        """Forward WhatsApp message to Telegram"""
+        if not self.running or not self.bot:
+            self.logger.warning("⚠️ Telegram bridge not running or bot not initialized")
+            return
+        
+        try:
+            if whatsapp_message.get('is_outgoing', False):
+                return
+            
+            sender = whatsapp_message.get('sender', 'Unknown')
+            text = whatsapp_message.get('text', '')
+            chat = whatsapp_message.get('chat', 'Unknown Chat')
+            
+            formatted_message = self._format_whatsapp_message(sender, text, chat)
+            
+            thread_id = await self._get_or_create_thread(sender, chat)
+            
+            if self.config.telegram.thread_per_user and thread_id:
+                telegram_msg = await self.bot.send_message(
+                    chat_id=self.config.telegram.bridge_group_id,
+                    text=formatted_message,
+                    message_thread_id=thread_id,
+                    parse_mode=ParseMode.HTML
+                )
             else:
-                raise ValueError(f"Unsupported auth method: {self.config.whatsapp.auth_method}")
+                telegram_msg = await self.bot.send_message(
+                    chat_id=self.config.telegram.bridge_group_id,
+                    text=formatted_message,
+                    parse_mode=ParseMode.HTML
+                )
             
-            if success:
-                await self._save_session(driver)
-                self.authenticated = True
-            
-            return success
+            self.message_mapping[telegram_msg.message_id] = whatsapp_message
+            self.logger.debug(f"📤 Forwarded message from {sender} to Telegram")
             
         except Exception as e:
-            self.logger.error(f"❌ Authentication failed: {e}")
-            return False
+            self.logger.error(f"❌ Failed to forward message to Telegram: {e}")
 
-    async def _authenticate_qr(self, driver) -> bool:
-        """Authenticate using QR code"""
-        self.logger.info("📱 Authenticating with QR code...")
+    async def forward_qr_code(self, qr_path: str):
+        """Send QR code image to Telegram"""
+        if not self.running or not self.bot:
+            self.logger.warning("⚠️ Telegram bridge not running or bot not initialized")
+            return
         
         try:
-            max_attempts = 3
-            driver.get("https://web.whatsapp.com")
-            time.sleep(5)  # Wait for page to load
+            self.logger.debug(f"📤 Sending QR code from {qr_path}")
+            with open(qr_path, 'rb') as photo:
+                await self.bot.send_photo(
+                    chat_id=self.config.telegram.bridge_group_id,
+                    photo=photo,
+                    caption="WhatsApp QR Code - Scan to authenticate"
+                )
+            self.logger.info("📤 QR code sent to Telegram bot successfully")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to send QR code to Telegram: {e}")
+
+    async def _get_or_create_thread(self, sender: str, chat: str) -> Optional[int]:
+        """Get existing thread or create new one for user"""
+        user_key = f"{sender}_{chat}"
+        
+        if user_key in self.user_threads:
+            return self.user_threads[user_key]
+        
+        try:
+            if self.config.telegram.thread_per_user:
+                thread_id = hash(user_key) % 1000000
+                self.user_threads[user_key] = thread_id
+                self.thread_users[thread_id] = user_key
+                return thread_id
             
-            for attempt in range(max_attempts):
-                self.logger.info(f"🔄 QR authentication attempt {attempt + 1}/{max_attempts}")
-                
-                # Look for QR code with multiple selectors
-                selectors = [
-                    'canvas[aria-label="Scan me!"]',
-                    'canvas',
-                    '[data-testid="qrcode"]',
-                    'div[data-testid="qr"] canvas'
-                ]
-                qr_element = None
-                qr_data = None
-                for selector in selectors:
-                    self.logger.debug(f"Trying QR selector: {selector}")
-                    qr_elements = driver.find_elements("css selector", selector)
-                    self.logger.debug(f"Found {len(qr_elements)} elements with selector {selector}")
-                    if qr_elements:
-                        qr_element = qr_elements[0]
-                        break
-                
-                if not qr_element:
-                    self.logger.warning("⚠️ No QR code found, retrying...")
-                    driver.refresh()
-                    time.sleep(3)
-                    continue
-                
-                # Get QR code data
-                qr_data = driver.execute_script("""
-                    var canvas = arguments[0];
-                    var ctx = canvas.getContext('2d');
-                    var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                    var pixels = imgData.data;
-                    var qrCodeData = '';
-                    for (var y = 0; y < canvas.height; y++) {
-                        for (var x = 0; x < canvas.width; x++) {
-                            var idx = (y * canvas.width + x) * 4;
-                            var isBlack = pixels[idx] < 128; // Simplified threshold
-                            qrCodeData += isBlack ? '1' : '0';
-                        }
-                    }
-                    return qrCodeData;
-                """, qr_element)
-                
-                # Generate and log ASCII QR code
-                try:
-                    import qrcode
-                    qr = qrcode.QRCode(version=1, box_size=10, border=5)
-                    qr.add_data(qr_data)
-                    qr.make(fit=True)
-                    self.logger.info("📱 ASCII QR Code (scan this with WhatsApp):")
-                    qr.print_ascii()
-                except ImportError:
-                    self.logger.error("❌ qrcode library not installed, cannot print ASCII QR code")
-                except Exception as e:
-                    self.logger.error(f"❌ Failed to generate ASCII QR code: {e}")
-                
-                # Save QR code as image
-                qr_path = await self._save_qr_code(qr_data)
-                self.logger.info(f"📱 QR Code saved to: {qr_path}")
-                self.logger.info("📱 Please scan the ASCII QR code above or the saved image with your WhatsApp mobile app")
-                
-                # Save screenshot for debugging
-                driver.save_screenshot("/app/temp/screenshot.png")
-                self.logger.info("📸 Saved screenshot to /app/temp/screenshot.png")
-                
-                # Wait for authentication
-                authenticated = await self._wait_for_authentication(driver, timeout=60)
-                
-                if authenticated:
-                    self.logger.info("✅ QR code authentication successful!")
-                    return True
+        except Exception as e:
+            self.logger.debug(f"Could not create thread for {sender}: {e}")
+        
+        return None
+
+    def _format_whatsapp_message(self, sender: str, text: str, chat: str) -> str:
+        """Format WhatsApp message for Telegram"""
+        text = text.replace('&', '&').replace('<', '<').replace('>', '>')
+        max_length = getattr(self.config.telegram, 'max_message_length', 4096)
+        if len(text) > max_length - 200:
+            text = text[:max_length - 200] + "..."
+        return f"<b>📱 {sender}</b> <i>({chat})</i>\n\n{text}"
+
+    async def _handle_start(self, update: Update, context):
+        """Handle /start command"""
+        if not self._is_admin_user(update.effective_user.id):
+            return
+        
+        welcome_text = """
+🤖 <b>WhatsApp UserBot Bridge</b>
+
+This bot bridges messages between WhatsApp and Telegram.
+
+<b>Commands:</b>
+/help - Show this help message
+/stats - Show bot statistics
+/users - List active WhatsApp users
+
+<b>How to reply:</b>
+Reply to any forwarded WhatsApp message to send a response back to WhatsApp.
+        """
+        await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
+
+    async def _handle_help(self, update: Update, context):
+        """Handle /help command"""
+        await self._handle_start(update, context)
+
+    async def _handle_stats(self, update: Update, context):
+        """Handle /stats command"""
+        if not self._is_admin_user(update.effective_user.id):
+            return
+        
+        stats_text = """
+📊 <b>Bot Statistics</b>
+
+🔄 Active threads: {thread_count}
+👥 Active users: {user_count}
+📨 Messages forwarded: N/A
+⏱ Uptime: N/A
+        """.format(
+            thread_count=len(self.user_threads),
+            user_count=len(set(self.user_threads.keys()))
+        )
+        await update.message.reply_text(stats_text, parse_mode=ParseMode.HTML)
+
+    async def _handle_users(self, update: Update, context):
+        """Handle /users command"""
+        if not self._is_admin_user(update.effective_user.id):
+            return
+        
+        if not self.user_threads:
+            await update.message.reply_text("No active WhatsApp users")
+            return
+        
+        users_text = "<b>👥 Active WhatsApp Users:</b>\n\n"
+        for user_key in self.user_threads.keys():
+            sender, chat = user_key.split('_', 1)
+            users_text += f"• {sender} ({chat})\n"
+        await update.message.reply_text(users_text, parse_mode=ParseMode.HTML)
+
+    async def _handle_telegram_message(self, update: Update, context):
+        """Handle incoming Telegram messages (replies)"""
+        if not self._is_admin_user(update.effective_user.id):
+            return
+        
+        message = update.message
+        if message.reply_to_message:
+            replied_msg_id = message.reply_to_message.message_id
+            if replied_msg_id in self.message_mapping:
+                whatsapp_msg = self.message_mapping[replied_msg_id]
+                sender = whatsapp_msg.get('sender')
+                chat = whatsapp_msg.get('chat')
+                reply_success = await self._send_whatsapp_reply(
+                    chat, sender, message.text
+                )
+                if reply_success:
+                    await message.reply_text("✅ Reply sent to WhatsApp")
                 else:
-                    self.logger.warning("⏰ QR code authentication timed out")
-            
-            self.logger.error("❌ QR authentication failed after all attempts")
-            return False
-            
-        except Exception as e:
-            self.logger.error(f"❌ QR authentication error: {e}")
-            return False
-
-    async def _authenticate_phone(self, driver) -> bool:
-        """Authenticate using phone number"""
-        self.logger.info("📞 Phone number authentication not fully implemented")
-        self.logger.info("📞 Falling back to QR code authentication")
-        return await self._authenticate_qr(driver)
-
-    async def _wait_for_authentication(self, driver, timeout: int = 60) -> bool:
-        """Wait for authentication to complete"""
-        start_time = time.time()
+                    await message.reply_text("❌ Failed to send reply to WhatsApp")
+                return
         
-        while time.time() - start_time < timeout:
-            try:
-                chats = driver.find_elements("css selector", "[data-testid='chat-list']")
-                if chats:
-                    return True
-                
-                qr_elements = driver.find_elements("css selector", "canvas")
-                if not qr_elements:
-                    reload_buttons = driver.find_elements("css selector", "[data-testid='qr-reload']")
-                    if reload_buttons:
-                        self.logger.info("🔄 QR code expired, clicking reload...")
-                        reload_buttons[0].click()
-                        time.sleep(2)
-                
-                time.sleep(2)
-                
-            except Exception as e:
-                self.logger.debug(f"Waiting for auth: {e}")
-                time.sleep(2)
-        
-        return False
+        thread_id = message.message_thread_id
+        if thread_id and thread_id in self.thread_users:
+            user_key = self.thread_users[thread_id]
+            sender, chat = user_key.split('_', 1)
+            reply_success = await self._send_whatsapp_reply(
+                chat, sender, message.text
+            )
+            if reply_success:
+                await message.reply_text("✅ Message sent to WhatsApp")
+            else:
+                await message.reply_text("❌ Failed to send message to WhatsApp")
 
-    async def _save_qr_code(self, qr_data: str) -> str:
-        """Save QR code data as image"""
+    async def _send_whatsapp_reply(self, chat: str, recipient: str, message: str) -> bool:
+        """Send reply back to WhatsApp"""
         try:
-            temp_dir = Path("./temp")
-            temp_dir.mkdir(exist_ok=True)
-            
-            qr_path = temp_dir / "whatsapp_qr.png"
-            
-            if qr_data.startswith("data:image/png;base64,"):
-                base64_data = qr_data.split(",")[1]
-                with open(qr_path, "wb") as f:
-                    f.write(base64.b64decode(base64_data))
-            
-            return str(qr_path)
-            
-        except Exception as e:
-            self.logger.error(f"❌ Failed to save QR code: {e}")
-            return "QR code could not be saved"
-
-    async def _save_session(self, driver):
-        """Save session data for future use"""
-        try:
-            cookies = driver.get_cookies()
-            
-            session_data = {
-                'cookies': cookies,
-                'timestamp': time.time(),
-                'user_agent': self.config.whatsapp.user_agent
-            }
-            
-            session_file = Path(self.config.whatsapp.session_dir) / "session.json"
-            with open(session_file, 'w') as f:
-                json.dump(session_data, f, indent=2)
-            
-            self.logger.info("💾 Session saved successfully")
-            
-        except Exception as e:
-            self.logger.error(f"❌ Failed to save session: {e}")
-
-    async def _load_session(self):
-        """Load existing session"""
-        try:
-            session_file = Path(self.config.whatsapp.session_dir) / "session.json"
-            
-            if not session_file.exists():
-                return False
-            
-            with open(session_file, 'r') as f:
-                session_data = json.load(f)
-            
-            if time.time() - session_data.get('timestamp', 0) > 86400:
-                self.logger.info("📅 Session expired, need fresh authentication")
-                return False
-            
-            driver.get("https://web.whatsapp.com")
-            
-            for cookie in session_data.get('cookies', []):
-                try:
-                    driver.add_cookie(cookie)
-                except Exception as e:
-                    self.logger.debug(f"Could not add cookie: {e}")
-            
-            driver.refresh()
-            time.sleep(3)
-            
+            self.logger.info(f"📤 Sending reply to {recipient} in {chat}: {message}")
             return True
-            
         except Exception as e:
-            self.logger.debug(f"Could not load session: {e}")
+            self.logger.error(f"❌ Failed to send WhatsApp reply: {e}")
             return False
 
-    def is_authenticated(self) -> bool:
-        """Check if currently authenticated"""
-        return self.authenticated
+    def _is_admin_user(self, user_id: int) -> bool:
+        """Check if user is admin"""
+        admin_users = getattr(self.config.telegram, 'admin_users', [])
+        return user_id in admin_users
 
-    async def logout(self, driver):
-        """Logout and clear session"""
+    async def _send_startup_notification(self):
+        """Send startup notification to Telegram"""
         try:
-            session_file = Path(self.config.whatsapp.session_dir) / "session.json"
-            if session_file.exists():
-                session_file.unlink()
-            
-            driver.delete_all_cookies()
-            
-            self.authenticated = False
-            self.logger.info("🚪 Logged out")
-            
+            await self.bot.send_message(
+                chat_id=self.config.telegram.bridge_group_id,
+                text="🚀 <b>WhatsApp UserBot Bridge Started</b>\n\nBot is now online and ready to forward messages!",
+                parse_mode=ParseMode.HTML
+            )
+            self.logger.info("📤 Startup notification sent to Telegram")
         except Exception as e:
-            self.logger.error(f"❌ Logout error: {e}")
+            self.logger.error(f"❌ Could not send startup notification: {e}")
+
+    async def shutdown(self):
+        """Shutdown Telegram bridge"""
+        if self.application:
+            self.logger.info("🛑 Shutting down Telegram bridge...")
+            await self.application.stop()
+            await self.application.shutdown()
+        self.running = False
+        self.logger.info("✅ Telegram bridge shutdown complete")
