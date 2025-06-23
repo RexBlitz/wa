@@ -60,6 +60,7 @@ class AuthenticationManager:
                     'div[data-testid="qr"] canvas'
                 ]
                 qr_element = None
+                qr_data = None
                 for selector in selectors:
                     self.logger.debug(f"Trying QR selector: {selector}")
                     qr_elements = driver.find_elements("css selector", selector)
@@ -77,16 +78,37 @@ class AuthenticationManager:
                 # Get QR code data
                 qr_data = driver.execute_script("""
                     var canvas = arguments[0];
-                    return canvas.toDataURL();
+                    var ctx = canvas.getContext('2d');
+                    var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    var pixels = imgData.data;
+                    var qrCodeData = '';
+                    for (var y = 0; y < canvas.height; y++) {
+                        for (var x = 0; x < canvas.width; x++) {
+                            var idx = (y * canvas.width + x) * 4;
+                            var isBlack = pixels[idx] < 128; // Simplified threshold
+                            qrCodeData += isBlack ? '1' : '0';
+                        }
+                    }
+                    return qrCodeData;
                 """, qr_element)
                 
-                # Log QR code data
-                self.logger.info(f"📱 QR code base64 data: {qr_data[:100]}... (full length: {len(qr_data)})")
+                # Generate and log ASCII QR code
+                try:
+                    import qrcode
+                    qr = qrcode.QRCode(version=1, box_size=10, border=5)
+                    qr.add_data(qr_data)
+                    qr.make(fit=True)
+                    self.logger.info("📱 ASCII QR Code (scan this with WhatsApp):")
+                    qr.print_ascii()
+                except ImportError:
+                    self.logger.error("❌ qrcode library not installed, cannot print ASCII QR code")
+                except Exception as e:
+                    self.logger.error(f"❌ Failed to generate ASCII QR code: {e}")
                 
                 # Save QR code as image
                 qr_path = await self._save_qr_code(qr_data)
                 self.logger.info(f"📱 QR Code saved to: {qr_path}")
-                self.logger.info("📱 Please scan the QR code with your WhatsApp mobile app")
+                self.logger.info("📱 Please scan the ASCII QR code above or the saved image with your WhatsApp mobile app")
                 
                 # Save screenshot for debugging
                 driver.save_screenshot("/app/temp/screenshot.png")
