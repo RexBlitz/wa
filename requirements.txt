@@ -11,7 +11,7 @@ PyYAML
 # Database
 motor
 pymongo
-
+colorlog
 # Async and utilities
 aiofiles
 aiohttp
