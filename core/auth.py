@@ -8,15 +8,12 @@ import json
 import base64
 from pathlib import Path
 from typing import Dict, Any, Optional
-import qrcode
-import re
-
-# Import necessary Selenium components
+import qrcode # Import qrcode library
+import re # Import re for regex used in auth
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-
 
 class AuthenticationManager:
     def __init__(self, config, logger, telegram_bridge=None):
@@ -72,7 +69,7 @@ class AuthenticationManager:
                 for selector in selectors:
                     self.logger.debug(f"Trying QR selector: {selector}")
                     try:
-                        qr_element = driver.find_element(By.CSS_SELECTOR, selector)
+                        qr_element = driver.find_element("css selector", selector)
                         self.logger.debug(f"Found QR element with selector: {selector}")
                         break
                     except NoSuchElementException:
@@ -154,7 +151,7 @@ class AuthenticationManager:
                 self.logger.info(f"📸 Saved screenshot to {screenshot_path}")
                 
                 # Wait for authentication
-                authenticated = await self._wait_for_authentication(driver, timeout=90) # Main timeout for auth process
+                authenticated = await self._wait_for_authentication(driver, timeout=90) # Increased timeout
                 
                 if authenticated:
                     self.logger.info("✅ QR code authentication successful!")
@@ -173,6 +170,11 @@ class AuthenticationManager:
         """Authenticate using phone number - Placeholder, not fully implemented."""
         self.logger.info("📞 Phone number authentication not fully implemented.")
         self.logger.info("📞 Falling back to QR code authentication.")
+        # To implement this, you would need to:
+        # 1. Locate and click the "Link with Phone Number" option.
+        # 2. Enter the phone number into the input field.
+        # 3. Handle the OTP/code input that WhatsApp prompts on your phone.
+        # 4. Wait for authentication success.
         return await self._authenticate_qr(driver)
 
     async def _wait_for_authentication(self, driver, timeout: int = 60) -> bool:
@@ -183,7 +185,7 @@ class AuthenticationManager:
             try:
                 # Check for elements indicating successful login (e.g., chat list)
                 # Use WebDriverWait for robustness
-                WebDriverWait(driver, 30).until( # Increased timeout to 30 seconds here
+                WebDriverWait(driver, 5).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid='chat-list']"))
                 )
                 self.logger.info("✅ Chat list found, authentication likely successful.")
@@ -297,9 +299,9 @@ class AuthenticationManager:
                 # Selenium might add cookies incorrectly if domain is not exact
                 # Remove 'expiry' if it's a float or None, as add_cookie expects int or None
                 if 'expiry' in cookie and (cookie['expiry'] is None or not isinstance(cookie['expiry'], (int, float))):
-                    cookie.pop('expiry')
+                    cookie.pop('expiry') # Remove or convert to int if necessary
                 elif 'expiry' in cookie and isinstance(cookie['expiry'], float):
-                    cookie['expiry'] = int(cookie['expiry'])
+                    cookie['expiry'] = int(cookie['expiry']) # Convert float to int
 
                 if 'domain' in cookie and 'whatsapp.com' in cookie['domain']:
                     try:
@@ -312,7 +314,7 @@ class AuthenticationManager:
             
             # Verify if session loaded successfully by checking for chat list
             try:
-                WebDriverWait(driver, 15).until( # Increased wait for session load
+                WebDriverWait(driver, 60).until( # Increased wait for session load
                     EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid='chat-list']"))
                 )
                 self.logger.info("✅ Session loaded and appears valid.")
