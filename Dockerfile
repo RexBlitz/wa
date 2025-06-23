@@ -1,63 +1,48 @@
-# Use a recent Ubuntu LTS base image
-FROM ubuntu:22.04
+# Use a lightweight base image with Python
+FROM python:3.9-slim
 
-# Set non-interactive mode for apt (prevents prompts during apt install)
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Update apt and install system dependencies:
-# - python3 and python3-pip for Python environment
-# - chromium-browser and chromium-chromedriver for Selenium automation on ARM64
-# - Essential libraries for headless browser operation (common dependencies)
-RUN apt update && apt install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    chromium-browser \
-    chromium-chromedriver \
-    fontconfig \
+# Install system dependencies for Chromium and headless browsing
+RUN apt-get update && apt-get install -y \
+    chromium \
+    chromium-driver \
+    xvfb \
+    libxi6 \
+    libgconf-2-4 \
     libnss3 \
+    libx11-xcb1 \
     libxcomposite1 \
+    libxcursor1 \
     libxdamage1 \
-    libxfixes3 \
     libxrandr2 \
-    libgbm-dev \
+    libasound2 \
+    libpangocairo-1.0-0 \
+    libatk1.0-0 \
     libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm-dev \
-    libexpat1 \
-    libglib2.0-0 \
     libgtk-3-0 \
-    libpci-dev \
-    libxkbcommon0 \
-    libxshmfence-dev \
-    libssl-dev \
-    libxtst6 \
-    libva-drm2 \
-    libva-x11-2 \
-    libva2 \
-    mesa-va-drivers \
-    mesa-vdpau-drivers \
-    unzip \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# (Optional but recommended) Symlink python to python3 for convenience
-# If you always use 'python3' in your scripts/commands, this is not strictly necessary.
-# However, many common Python tools might default to 'python'.
-RUN ln -s /usr/bin/python3 /usr/bin/python
-
-# Set the working directory inside the container
+# Set working directory
 WORKDIR /app
 
-# Copy only requirements.txt first to take advantage of Docker layer caching.
-# If requirements.txt doesn't change, this layer (and subsequent ones) can be reused.
-COPY requirements.txt .
+# Copy application code
+COPY . /app
 
-# Install Python dependencies.
-# --no-cache-dir reduces image size.
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    selenium \
+    webdriver-manager \
+    qrcode \
+    pillow
 
-# Copy the rest of your application code into the container
-COPY . .
+# Create directories for temp and sessions
+RUN mkdir -p /app/temp /app/sessions && \
+    chmod -R 777 /app/temp /app/sessions
 
-# Set the entrypoint command to run your main application file
-# Using ["python3", "main.py"] ensures python3 is explicitly called
-CMD ["python3", "main.py"]
+# Set environment variables for headless browsing
+ENV DISPLAY=:99
+ENV CHROME_BIN=/usr/bin/chromium
+ENV CHROMEDRIVER_BIN=/usr/bin/chromedriver
+
+# Run the bot with Xvfb for headless browsing
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1024x768x24 & python bot.py"]
