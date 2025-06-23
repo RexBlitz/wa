@@ -8,7 +8,7 @@ bot:
 
 whatsapp:
   auth_method: "qr"  # qr or phone
-  phone_number: ""  # Optional: +1234567890
+  phone_number: "+923298784489"  # Optional: +1234567890
   session_dir: "./sessions"
   headless: false
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -17,9 +17,9 @@ whatsapp:
   
 telegram:
   enabled: true
-  bot_token: ""  # Your Telegram bot token
-  bridge_group_id: ""  # Telegram group ID for bridging
-  admin_users: []  # List of Telegram user IDs who can manage
+  bot_token: "7580382614:AAH30PW6TFmgRzbC7HUXIHQ35GpndbJOIEI"  # Your Telegram bot token
+  bridge_group_id: "-1002287300661"  # Telegram group ID for bridging
+  admin_users: ["7405203657"]  # List of Telegram user IDs who can manage
   thread_per_user: true
   forward_media: true
   max_message_length: 4096
@@ -27,7 +27,7 @@ telegram:
 database:
   type: "mongodb"  # mongodb or local
   mongodb:
-    connection_string: ""  # MongoDB connection string
+    connection_string: "mongodb+srv://irexanon:xUf7PCf9cvMHy8g6@rexdb.d9rwo.mongodb.net/?retryWrites=true&w=majority&appName=RexDB"  # MongoDB connection string
     database_name: "whatsapp_userbot"
     collections:
       messages: "messages"
