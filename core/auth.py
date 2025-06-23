@@ -8,24 +8,15 @@ import json
 import base64
 from pathlib import Path
 from typing import Dict, Any, Optional
-import telegram
-import asyncio
 
 
 class AuthenticationManager:
-    def __init__(self, config, logger):
+    def __init__(self, config, logger, telegram_bridge=None):
         self.config = config
         self.logger = logger
         self.session_data = {}
         self.authenticated = False
-        # Initialize Telegram bot
-        self.telegram_bot = None
-        if hasattr(self.config, 'telegram') and self.config.telegram.bot_token and self.config.telegram.chat_id:
-            try:
-                self.telegram_bot = telegram.Bot(token=self.config.telegram.bot_token)
-                self.logger.info("🤖 Telegram bot initialized successfully")
-            except Exception as e:
-                self.logger.error(f"❌ Failed to initialize Telegram bot: {e}")
+        self.telegram_bridge = telegram_bridge
 
     async def authenticate(self, driver) -> bool:
         """Main authentication method"""
@@ -64,9 +55,9 @@ class AuthenticationManager:
                 
                 # Look for QR code with multiple selectors
                 selectors = [
+                    '[data-testid="qrcode"]',
                     'canvas[aria-label="Scan me!"]',
                     'canvas',
-                    '[data-testid="qrcode"]',
                     'div[data-testid="qr"] canvas'
                 ]
                 qr_element = None
@@ -84,27 +75,48 @@ class AuthenticationManager:
                     time.sleep(3)
                     continue
                 
-                # Get QR code data
-                qr_data = driver.execute_script("""
-                    var canvas = arguments[0];
-                    return canvas.toDataURL();
-                """, qr_element)
+                # Get QR code data (use data-ref if available, else toDataURL)
+                qr_data = None
+                try:
+                    qr_data = qr_element.get_attribute("data-ref") or driver.execute_script("""
+                        var canvas = arguments[0];
+                        return canvas.toDataURL();
+                    """, qr_element)
+                except Exception as e:
+                    self.logger.debug(f"Failed to get QR data: {e}")
                 
-                # Log QR code base64 data (truncated for brevity)
-                self.logger.info(f"📱 QR code base64 data: {qr_data[:100]}... (full length: {len(qr_data)})")
+                if not qr_data:
+                    self.logger.warning("⚠️ No QR code data retrieved, retrying...")
+                    driver.refresh()
+                    time.sleep(3)
+                    continue
+                
+                # Log QR code base64 data if toDataURL was used
+                if qr_data.startswith("data:image/png;base64,"):
+                    self.logger.info(f"📱 QR code base64 data: {qr_data[:100]}... (full length: {len(qr_data)})")
                 
                 # Generate and log compact ASCII QR code
                 try:
                     import qrcode
-                    qr = qrcode.QRCode(version=1, box_size=1, border=0, error_correction=qrcode.constants.ERROR_CORRECT_L)
+                    qr = qrcode.QRCode(
+                        version=1,
+                        box_size=1,
+                        border=0,
+                        error_correction=qrcode.constants.ERROR_CORRECT_L
+                    )
                     qr.add_data(qr_data[:500])  # Limit data to ensure small size
                     qr.make(fit=True)
                     self.logger.info("📱 Compact ASCII QR Code (scan this with WhatsApp):")
-                    qr.print_ascii(invert=True)  # Invert for better terminal contrast
+                    qr.print_ascii(invert=True)
                 except Exception as e:
                     self.logger.error(f"❌ Failed to generate ASCII QR code: {e}. Trying with minimal data...")
                     try:
-                        qr = qrcode.QRCode(version=1, box_size=1, border=0, error_correction=qrcode.constants.ERROR_CORRECT_L)
+                        qr = qrcode.QRCode(
+                            version=1,
+                            box_size=1,
+                            border=0,
+                            error_correction=qrcode.constants.ERROR_CORRECT_L
+                        )
                         qr.add_data(qr_data[:200])  # Further truncate
                         qr.make(fit=True)
                         self.logger.info("📱 Minimal ASCII QR Code (scan this with WhatsApp):")
@@ -116,9 +128,13 @@ class AuthenticationManager:
                 qr_path = await self._save_qr_code(qr_data)
                 self.logger.info(f"📱 QR Code saved to: {qr_path}")
                 
-                # Send QR code to Telegram bot
-                if self.telegram_bot and qr_path != "QR code could not be saved":
-                    await self._send_to_telegram(qr_path)
+                # Send QR code to Telegram via TelegramBridge
+                if self.telegram_bridge and qr_path != "QR code could not be saved":
+                    try:
+                        await self.telegram_bridge.forward_qr_code(qr_path)
+                        self.logger.info("📤 QR code sent to Telegram bot successfully")
+                    except Exception as e:
+                        self.logger.error(f"❌ Failed to send QR code to Telegram: {e}")
                 
                 self.logger.info("📱 Please scan the ASCII QR code above, the saved image, or check your Telegram bot")
                 
@@ -141,23 +157,6 @@ class AuthenticationManager:
         except Exception as e:
             self.logger.error(f"❌ QR authentication error: {e}")
             return False
-
-    async def _send_to_telegram(self, qr_path: str):
-        """Send QR code image to Telegram bot"""
-        try:
-            if not self.telegram_bot:
-                self.logger.warning("⚠️ Telegram bot not initialized, skipping send")
-                return
-            
-            with open(qr_path, 'rb') as photo:
-                await self.telegram_bot.send_photo(
-                    chat_id=self.config.telegram.chat_id,
-                    photo=photo,
-                    caption="WhatsApp QR Code - Scan to authenticate"
-                )
-            self.logger.info("📤 QR code sent to Telegram bot successfully")
-        except Exception as e:
-            self.logger.error(f"❌ Failed to send QR code to Telegram: {e}")
 
     async def _authenticate_phone(self, driver) -> bool:
         """Authenticate using phone number"""
