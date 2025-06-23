@@ -22,9 +22,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /app/temp /app/sessions /app/logs && \
-    chmod -R 777 /app/temp /app/sessions /app/logs
+RUN mkdir -p /app/temp /app/sessions /app/logs /app/data /app/modules/system /app/modules/custom && \
+    chmod -R 777 /app/temp /app/sessions /app/logs /app/data /app/modules && \
+    ln -sf /usr/bin/chromium /usr/bin/chromium-browser && \
+    ln -sf /usr/bin/chromium-driver /usr/bin/chromedriver
 
-RUN rm -f /tmp/.X99-lock
+RUN rm -f /tmp/.X*-lock
 
-CMD ["python", "main.py"]
+CMD ["python", "main.py", "--debug"]
