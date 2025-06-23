@@ -1,6 +1,6 @@
 """
 Authentication manager for WhatsApp UserBot
-Handles login, session management, and authentication with improved popup handling
+Handles login, session management, and authentication with improved QR handling
 """
 
 import time
@@ -91,7 +91,7 @@ class AuthenticationManager:
                     time.sleep(3)
                     continue
 
-                # Get QR code data
+                # Get QR code data with enhanced logging
                 qr_data_ref = qr_element.get_attribute("data-ref")
                 qr_data_url = None
                 if qr_element.tag_name == 'canvas':
@@ -99,8 +99,9 @@ class AuthenticationManager:
                         qr_data_url = driver.execute_script(
                             "return arguments[0].toDataURL();", qr_element
                         )
+                        self.logger.debug(f"QR data URL length: {len(qr_data_url)}")
                     except Exception as e:
-                        self.logger.debug(f"Failed to get canvas data URL: {e}")
+                        self.logger.warning(f"Failed to get canvas data URL: {e}")
 
                 qr_data_to_encode = qr_data_ref if qr_data_ref else qr_data_url
                 if not qr_data_to_encode:
@@ -109,7 +110,7 @@ class AuthenticationManager:
                     time.sleep(3)
                     continue
 
-                self.logger.info(f"📱 QR code data retrieved (length: {len(qr_data_to_encode)})")
+                self.logger.info(f"📱 QR code data retrieved (sample: {qr_data_to_encode[:50]}...)")
 
                 # Save QR code as image
                 qr_path = await self._save_qr_code(qr_data_to_encode, qr_data_ref is not None)
@@ -150,12 +151,15 @@ class AuthenticationManager:
                 driver.save_screenshot(str(screenshot_path))
                 self.logger.info(f"📸 Saved screenshot to {screenshot_path}")
 
-                # Wait for authentication
+                # Wait for authentication with retry on failure
                 if await self._wait_for_authentication(driver, timeout=120):
                     self.logger.info("✅ QR code authentication successful")
                     return True
                 else:
-                    self.logger.warning("⏰ QR code authentication timed out")
+                    self.logger.warning("⏰ QR code authentication timed out, refreshing session...")
+                    driver.delete_all_cookies()
+                    driver.refresh()
+                    time.sleep(3)
 
             self.logger.error("❌ QR authentication failed after all attempts")
             return False
@@ -170,7 +174,7 @@ class AuthenticationManager:
         return await self._authenticate_qr(driver)
 
     async def _wait_for_authentication(self, driver, timeout: int = 120) -> bool:
-        """Wait for authentication to complete with improved popup handling"""
+        """Wait for authentication to complete with improved handling"""
         start_time = time.time()
         self.logger.info(f"⏳ Waiting for authentication (timeout: {timeout} seconds)")
 
@@ -191,7 +195,6 @@ class AuthenticationManager:
             '[data-testid="wa-connection-error"]',
             'div.loading'
         ]
-        # Updated popup selector: Use XPath to find button with "Continue" text
         popup_selector = "//button[contains(text(), 'Continue') or contains(@data-testid, 'continue')]"
 
         while time.time() - start_time < timeout:
@@ -204,14 +207,14 @@ class AuthenticationManager:
                     time.sleep(2)
                     continue
 
-                # Check for and dismiss the Continue popup using XPath
+                # Check for and dismiss the Continue popup
                 try:
                     continue_button = WebDriverWait(driver, 5).until(
                         EC.element_to_be_clickable((By.XPATH, popup_selector))
                     )
                     self.logger.info("📣 Found Continue popup, clicking...")
                     ActionChains(driver).move_to_element(continue_button).click().perform()
-                    time.sleep(2)  # Wait for page to update after clicking
+                    time.sleep(2)
                     screenshot_path = Path(f"/app/temp/popup_dismissed_{int(time.time())}.png")
                     driver.save_screenshot(str(screenshot_path))
                     self.logger.info(f"📸 Saved popup dismissal screenshot to {screenshot_path}")
